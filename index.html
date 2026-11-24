@@ -93,7 +93,14 @@
   .page .order { display: inline-flex; gap: 4px; }
   .page .fail { display: grid; gap: 10px; justify-items: center; padding: 24px 16px; color: var(--muted); text-align: center; }
   .warn-text { color: var(--warn); }
-  .page .actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 10px 12px 12px; }
+  .page .actions { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; padding: 10px 12px 12px; }
+  .btn.picked { border-color: var(--accent); color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .sheet { position: fixed; inset: 0; z-index: 25; background: rgb(0 0 0 / .45); display: flex; align-items: flex-end; justify-content: center; }
+  .sheet[hidden] { display: none !important; }
+  .sheet-card { width: min(720px, 100%); background: var(--surface); color: var(--ink); border-radius: 18px 18px 0 0; display: grid; gap: 12px;
+    padding: 18px max(16px, env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
+  .sheet-card h2 { font-size: 18px; margin: 0; }
+  .sheet-card .hint { margin: 0; }
   .badge { font-size: 12px; padding: 2px 9px; border-radius: 99px; font-weight: 600; white-space: nowrap; }
   .badge.ok { background: var(--ok-bg); color: var(--ok); }
   .badge.warn { background: var(--warn-bg); color: var(--warn); }
@@ -144,7 +151,8 @@
     .footer .btn { font-size: 14px; padding-inline: 4px; }
     .footer .btn svg { display: none; }
     .page .actions { gap: 4px; padding-inline: 8px; }
-    .page .actions .btn { font-size: 13px; padding-inline: 4px; }
+    .page .actions .btn { font-size: 13px; padding-inline: 2px; }
+    .page .actions .caret { display: none; }
     .modes button { font-size: 14px; }
   }
   @media (prefers-reduced-motion: reduce) { .toast { transition: none; } }
@@ -169,7 +177,7 @@
     <input id="gallery" type="file" accept="image/*" multiple hidden tabindex="-1" aria-hidden="true">
   </div>
 
-  <div class="modes" role="group" aria-label="보정 방식">
+  <div class="modes" id="modes" role="group" aria-label="보정 방식 (모든 쪽)">
     <button type="button" data-mode="color" aria-pressed="true">컬러</button>
     <button type="button" data-mode="bw" aria-pressed="false">흑백</button>
     <button type="button" data-mode="gray" aria-pressed="false">회색조</button>
@@ -186,6 +194,7 @@
       <li>네 모서리가 모두 화면 안에 들어오게 위에서 찍어요.</li>
       <li>여러 장은 아래 <b>더 찍기</b>로 이어서 찍고, 다 찍으면 <b>이미지 저장</b>이나 <b>PDF 저장</b>을 한 번만 눌러요.</li>
       <li>테두리가 어긋나면 <b>모서리</b> 버튼을 눌러 파란 점을 끌어 맞춰요. 자신 없는 쪽에는 <b>확인 필요</b>가 붙어요.</li>
+      <li>위의 보정 방식은 모든 쪽에 적용돼요. 한 쪽만 다르게 하려면 그 쪽의 <b>컬러 ▾</b> 단추로 골라요.</li>
       <li>쪽 순서는 ↑ ↓ 로 바꾸고, 잘못 지웠으면 바로 <b>되돌리기</b>를 눌러요.</li>
     </ul>
   </section>
@@ -218,6 +227,19 @@
   </div>
 </div>
 
+<div class="sheet" id="modeSheet" role="dialog" aria-modal="true" aria-labelledby="msTitle" hidden>
+  <div class="sheet-card">
+    <h2 id="msTitle">보정 방식</h2>
+    <div class="modes" role="group" aria-labelledby="msTitle">
+      <button type="button" data-pmode="color" aria-pressed="false">컬러</button>
+      <button type="button" data-pmode="bw" aria-pressed="false">흑백</button>
+      <button type="button" data-pmode="gray" aria-pressed="false">회색조</button>
+      <button type="button" data-pmode="original" aria-pressed="false">원본</button>
+    </div>
+    <p class="hint" id="msHint"></p>
+    <button type="button" class="btn" id="msClose">닫기</button>
+  </div>
+</div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 
@@ -242,26 +264,50 @@ function grayOf(d, n) {
 }
 function planeOf(d, n, c) { const p = new Uint8Array(n); for (let i = 0, j = c; i < n; i++, j += 4) p[i] = d[j]; return p; }
 // 가로·세로로 나눈 최대/최소 필터 (사각형 커널). van Herk/Gil-Werman: 커널 크기와 상관없이 픽셀당 비교 3번
+// 세로 방향도 한 줄씩(행 단위로) 처리해 메모리를 차례로 읽는다 (큰 그림에서 몇 배 빠르다). 최소 필터는 뒤집어(255-v) 최대 필터로
 function morph(src, w, h, k, isMax) {
-  const r = k >> 1, id = isMax ? 0 : 255, len = Math.max(w, h) + 2 * r;
-  const p = new Uint8Array(len), g = new Uint8Array(len), hh = new Uint8Array(len);
-  const tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
-  const pass = (from, to, n, base, stride) => {
-    const L = n + 2 * r;
-    for (let i = 0; i < r; i++) { p[i] = id; p[L - 1 - i] = id; }
-    for (let j = 0, q = base; j < n; j++, q += stride) p[j + r] = from[q];
-    if (isMax) {
-      for (let i = 0; i < L; i++) { const v = p[i]; g[i] = i % k === 0 || g[i - 1] < v ? v : g[i - 1]; }
-      for (let i = L - 1; i >= 0; i--) { const v = p[i]; hh[i] = i % k === k - 1 || i === L - 1 || hh[i + 1] < v ? v : hh[i + 1]; }
-      for (let x = 0, q = base; x < n; x++, q += stride) { const a = hh[x], b = g[x + k - 1]; to[q] = a > b ? a : b; }
-    } else {
-      for (let i = 0; i < L; i++) { const v = p[i]; g[i] = i % k === 0 || g[i - 1] > v ? v : g[i - 1]; }
-      for (let i = L - 1; i >= 0; i--) { const v = p[i]; hh[i] = i % k === k - 1 || i === L - 1 || hh[i + 1] > v ? v : hh[i + 1]; }
-      for (let x = 0, q = base; x < n; x++, q += stride) { const a = hh[x], b = g[x + k - 1]; to[q] = a < b ? a : b; }
+  if (!isMax) {
+    const inv = new Uint8Array(w * h);
+    for (let i = 0; i < inv.length; i++) inv[i] = 255 - src[i];
+    const o = maxFilter(inv, w, h, k);
+    for (let i = 0; i < o.length; i++) o[i] = 255 - o[i];
+    return o;
+  }
+  return maxFilter(src, w, h, k);
+}
+function maxFilter(src, w, h, k) {
+  const r = k >> 1, tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
+  { // 가로
+    const L = w + 2 * r, p = new Uint8Array(L), g = new Uint8Array(L), hh = new Uint8Array(L);
+    for (let y = 0; y < h; y++) {
+      const base = y * w;
+      p.set(src.subarray(base, base + w), r);
+      for (let s = 0; s < L; s += k) { // k 칸씩 끊어 앞으로·뒤로 누적 최대
+        const e = Math.min(L, s + k);
+        let m = p[s]; g[s] = m;
+        for (let i = s + 1; i < e; i++) { const v = p[i]; if (v > m) m = v; g[i] = m; }
+        m = p[e - 1]; hh[e - 1] = m;
+        for (let i = e - 2; i >= s; i--) { const v = p[i]; if (v > m) m = v; hh[i] = m; }
+      }
+      for (let x = 0; x < w; x++) { const a = hh[x], b = g[x + k - 1]; tmp[base + x] = a > b ? a : b; }
     }
-  };
-  for (let y = 0; y < h; y++) pass(src, tmp, w, y * w, 1);
-  for (let x = 0; x < w; x++) pass(tmp, out, h, x, w);
+  }
+  { // 세로: 덧댄 줄 i(0..L-1) = tmp 의 i-r 번째 줄 (밖이면 0)
+    const L = h + 2 * r, G = new Uint8Array(L * w), H = new Uint8Array(L * w);
+    G.set(tmp, r * w); H.set(tmp, r * w);
+    for (let i = 1, c = 1; i < L; i++, c++) {
+      if (c === k) { c = 0; continue; }
+      const o = i * w, q = o - w;
+      for (let x = 0; x < w; x++) { const a = G[q + x], v = G[o + x]; if (a > v) G[o + x] = a; }
+    }
+    for (let i = L - 2, c = (L - 2) % k; i >= 0; i--, c--) {
+      if (c < 0) c = k - 1;
+      if (c === k - 1) continue;
+      const o = i * w, q = o + w;
+      for (let x = 0; x < w; x++) { const a = H[q + x], v = H[o + x]; if (a > v) H[o + x] = a; }
+    }
+    for (let y = 0; y < h; y++) { const a = y * w, b = (y + k - 1) * w; for (let x = 0; x < w; x++) { const u = H[a + x], v = G[b + x]; out[a + x] = u > v ? u : v; } }
+  }
   return out;
 }
 const dilate = (s, w, h, k) => morph(s, w, h, k, true);
@@ -525,9 +571,18 @@ function contourQuads(sm, w, h) {
     for (let i = 0; i < n; i++) low[i] = sat[i] <= st && (!useBright || bright[i]) ? 1 : 0;
     masks.push([low, false]);
   }
+  // 무늬 식탁보(깅엄·줄무늬) 위의 종이: 글자를 작게 지우고(닫힘 5) 작은 밝은 칸을 '열림'으로 지운 뒤 다시 닫으면
+  // 넓은 종이만 밝게 남는다 → 그 덩어리도 후보로. 이 그림은 무늬 위 두 번째 판단에도 쓴다
+  let oc = null;
+  for (const div of [24, 14]) {
+    const im = closeOp(openOp(closeOp(gray, w, h, 5), w, h, odd(Math.max(w, h) / div)), w, h, 17), ot = otsu(im), m = new Uint8Array(n);
+    for (let i = 0; i < n; i++) m[i] = im[i] > ot ? 1 : 0;
+    masks.push([m, false]);
+    oc = im;
+  }
   const quads = [];
   for (const [mask, eight] of masks) for (const [quad, fill] of quadCandidates(mask, w, h, eight)) if (fill >= 0.8) quads.push(quad);
-  return { quads, clean, sat };
+  return { quads, clean, sat, oc };
 }
 
 // R·G·B 중 가장 센 기울기를 고른다 → 밝기가 비슷한 종이·책상도 색 차이로 구분한다.
@@ -812,25 +867,30 @@ function interiorPaperFraction(q, G, gray, rgb, w, h, ref) {
   }
   // 네 변 바로 안쪽 띠도 종이여야 한다 (식탁보 줄무늬로 만든 사각형은 변 안쪽이 천 무늬다)
   let edge = 0, en = 0, patternSides = 0;
+  const sideInfo = [];
   for (let k = 0; k < 4; k++) {
     const a = q[k], b = q[(k + 1) % 4], L = Math.hypot(b[0] - a[0], b[1] - a[1]), nx = -(b[1] - a[1]) / L, ny = (b[0] - a[0]) / L;
-    let prev = -1, flips = 0;
+    let prev = -1, pend = -1, flips = 0, sp = 0, sn = 0;
     for (let j = 1; j < 24; j++) {
       const t = j / 24, x = Math.round(a[0] + (b[0] - a[0]) * t + nx * 5), y = Math.round(a[1] + (b[1] - a[1]) * t + ny * 5);
       if (x < 1 || y < 1 || x > w - 2 || y > h - 2) continue;
-      const o = (y * w + x) * 4, sum = rgb[o] + rgb[o + 1] + rgb[o + 2] + 1, cr = rgb[o] / sum, cg = rgb[o + 1] / sum;
+      let R = 0, Gs = 0, B = 0; // 5×5 평균 색 (어두운 사진의 색 잡음에 흔들리지 않게)
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const o = (clamp(y + dy, 0, h - 1) * w + clamp(x + dx, 0, w - 1)) * 4; R += rgb[o]; Gs += rgb[o + 1]; B += rgb[o + 2]; }
+      const sum = R + Gs + B + 1, cr = R / sum, cg = Gs / sum;
       const dist = Math.abs(cr - pr) + Math.abs(cg - pg) + Math.abs(cr + cg - pr - pg);
       en++;
       const isPaper = gray[y * w + x] >= 0.5 * ref && dist < 0.045 ? 1 : 0;
-      edge += isPaper;
-      if (prev >= 0 && isPaper !== prev) flips++;
-      prev = isPaper;
+      edge += isPaper; sp += isPaper; sn++;
+      // 무늬(식탁보)는 종이·천이 번갈아 길게 이어진다. 한 칸짜리 흔들림(잡음)은 뒤집힘으로 세지 않는다
+      if (isPaper === pend) { if (prev >= 0 && isPaper !== prev) flips++; prev = isPaper; }
+      pend = isPaper;
     }
     // 종이색과 다른 색이 여러 번 번갈아 나오면 그 변은 식탁보·타일 무늬 위에 있다
     // (인쇄된 테두리·문서 속 사진은 한 덩어리라 거의 바뀌지 않는다)
     if (flips >= 4) patternSides++;
+    sideInfo.push([sn ? +(sp / sn).toFixed(2) : 1, flips]);
   }
-  return { interior: paper / pts.length, edge: en ? edge / en : 1, patternSides };
+  return { interior: paper / pts.length, edge: en ? edge / en : 1, patternSides, sideInfo };
 }
 
 /** 후보 사각형 점수: 네 변이 실제 에지를 끝까지 따라가는지 × 크기 × 모양 × 안쪽이 밝은지 */
@@ -843,7 +903,8 @@ function quadScore(quad, G, gray, w, h) {
   if (Math.min(...ang) < 35 || Math.max(...ang) > 145) return null;
   const m = 0.012 * Math.max(w, h);
   const frame = [[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]];
-  if (q.filter(([x, y], k) => Math.abs(x - frame[k][0]) < 2 * m && Math.abs(y - frame[k][1]) < 2 * m).length >= 3) return null; // 사진 테두리 자체
+  const fm = (self.__detCfg && self.__detCfg.frame || 0.005) * Math.max(w, h);
+  if (q.filter(([x, y], k) => Math.abs(x - frame[k][0]) < fm && Math.abs(y - frame[k][1]) < fm).length >= 3) return null; // 사진 테두리 자체
   let sum = 0, minS = 1, con = 0, cn = 0, endPenalty = 1, gapPenalty = 1;
   for (let k = 0; k < 4; k++) {
     const a = q[k], b = q[(k + 1) % 4], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
@@ -887,7 +948,17 @@ function quadScore(quad, G, gray, w, h) {
 
 function refineCorners(img, corners, md) {
   const w = md.w, h = md.h, sc = md.scale;
-  const g = blurPlane(grayOf(md.data, w * h), w, h, 1.2);
+  // 흐린 밝기는 네 변 근처 몇 천 점에서만 필요하다 → 그림 전체를 흐리지 않고 필요한 점만 그때그때 계산한다
+  const { k: gk, r: gr } = gaussKernel(1.2), gd = md.data, memo = new Float32Array(w * h).fill(-1);
+  const lum = (x, y) => { const j = ((y < 0 ? 0 : y >= h ? h - 1 : y) * w + (x < 0 ? 0 : x >= w ? w - 1 : x)) * 4; return (gd[j] * 77 + gd[j + 1] * 150 + gd[j + 2] * 29) >> 8; };
+  const gAt = (i) => {
+    let v = memo[i];
+    if (v >= 0) return v;
+    const y = (i / w) | 0, x = i - y * w;
+    v = 0;
+    for (let a = -gr; a <= gr; a++) { let s = 0; for (let b = -gr; b <= gr; b++) s += lum(x + b, y + a) * gk[b + gr]; v += s * gk[a + gr]; }
+    return (memo[i] = v);
+  };
   const q = corners.map(([x, y]) => [x * sc, y * sc]);
   const R = Math.max(6, Math.round(0.012 * Math.max(w, h)));
   const lines = q.map((a, k) => {
@@ -901,13 +972,20 @@ function refineCorners(img, corners, md) {
         const x = Math.round(px + nx * o), y = Math.round(py + ny * o);
         if (x < 1 || y < 1 || x > w - 2 || y > h - 2) continue;
         const i = y * w + x;
-        const sx = (g[i - w + 1] + 2 * g[i + 1] + g[i + w + 1] - g[i - w - 1] - 2 * g[i - 1] - g[i + w - 1]) / 4;
-        const sy = (g[i + w - 1] + 2 * g[i + w] + g[i + w + 1] - g[i - w - 1] - 2 * g[i - w] - g[i - w + 1]) / 4;
+        const sx = (gAt(i - w + 1) + 2 * gAt(i + 1) + gAt(i + w + 1) - gAt(i - w - 1) - 2 * gAt(i - 1) - gAt(i + w - 1)) / 4;
+        const sy = (gAt(i + w - 1) + 2 * gAt(i + w) + gAt(i + w + 1) - gAt(i - w - 1) - 2 * gAt(i - w) - gAt(i - w + 1)) / 4;
         const pr = Math.abs(sx * nx + sy * ny), v = pr >= 0.8 * Math.sqrt(sx * sx + sy * sy) ? pr : 0;
         vals[o + R] = v;
         if (v > best) { best = v; bo = o; }
       }
       if (best < 4) continue;
+      // 대략 위치(0)에 가장 가까운 '충분히 강한' 에지를 고른다: 종이 가장자리 바로 안쪽의 인쇄된 테두리처럼
+      // 더 진한 에지가 가까이 있어도 끌려가지 않게 (대략 위치는 이미 1% 안쪽으로 맞다)
+      for (let d = 0; d <= R; d++) {
+        let pick = -1e9;
+        for (const o of d ? [-d, d] : [0]) { const v = vals[o + R]; if (v >= 0.5 * best && v >= vals[Math.max(0, o + R - 1)] && v >= vals[Math.min(2 * R, o + R + 1)]) pick = o; }
+        if (pick > -1e9) { bo = pick; break; }
+      }
       let off = bo;
       const k2 = bo + R;
       if (k2 > 0 && k2 < 2 * R) { const l = vals[k2 - 1], c = vals[k2], r = vals[k2 + 1], den = l - 2 * c + r; if (den < 0) off = bo + (0.5 * (l - r)) / den; }
@@ -929,8 +1007,166 @@ function confidenceOf(f) {
   c *= 0.6 + 0.4 * clamp(f.margin / 0.5, 0, 1); // 비슷하게 그럴듯한 다른 사각형이 있으면 낮춘다
   if (f.crossed) c *= 0.5;
   if (f.pattern) c *= f.pattern >= 2 ? 0.4 : 0.7;
-  c *= clamp((f.paper - 0.3) / 0.4, 0.3, 1) * clamp((f.edgePaper - 0.5) / 0.4, 0.6, 1);
+  c *= clamp((f.paper - 0.2) / 0.5, 0.3, 1) * clamp((f.edgePaper - 0.5) / 0.4, 0.6, 1);
+  // 안쪽이 사진 속 종이보다 훨씬 어둡고(작거나 바깥에 글자가 이어지면) 문서 속 색 띠·상자만 잡은 것
+  const maxTex = Math.max(...f.sides.map((x) => x[1]));
+  if (f.inRel < 0.6 && (f.area < 0.15 || maxTex >= 0.1)) c *= 0.3;
+  // 한 변 바깥만 종이가 이어진다 → 문서를 가로질러 잘랐다 (모서리가 사진 밖으로 나간 종이 등)
+  const sp = f.sides.map((x) => x[0]).sort((x, y) => x - y);
+  if (sp[3] - sp[2] >= 0.8) c *= 0.4;
   return clamp(c * 1.5, 0, 1);
+}
+
+/** 사진(RGBA)에서 문서 네 모서리 [tl,tr,br,bl]와 확신도(0~1). 못 찾으면 null */
+/**
+ * 이음매: 후보 안을 마주 보는 두 변 사이로 끝까지 가로지르는 또렷한 직선 (두 변과 나란함).
+ * 펼친 책의 가운데, 나란히 놓인 두 장 사이 틈, 겹친 종이의 가장자리에서 생긴다 → 후보가 두 장을 함께 잡았을 수 있다.
+ * (표의 선·글자는 '글자를 지운' 기울기에서 사라지고, 인쇄된 선은 보통 여백에서 끊긴다)
+ */
+function seamStrength(q, lines, G, w, h, gray, rgb, ref) {
+  const size = Math.sqrt(polyArea(q));
+  let best = 0, bestPaper = 0;
+  // 그 점이 종이인지 (밝고, 안쪽 종이와 색이 같다)
+  const pc = (() => { let r = 0, g = 0, b = 0, n = 0; for (let i = 1; i < 8; i++) for (let j = 1; j < 8; j++) { const u = i / 8, t = j / 8;
+    const x = Math.round((1 - t) * ((1 - u) * q[0][0] + u * q[1][0]) + t * ((1 - u) * q[3][0] + u * q[2][0])), y = Math.round((1 - t) * ((1 - u) * q[0][1] + u * q[1][1]) + t * ((1 - u) * q[3][1] + u * q[2][1]));
+    const k = clamp(y, 0, h - 1) * w + clamp(x, 0, w - 1); if (gray[k] < 0.8 * ref) continue; const o = k * 4, s = rgb[o] + rgb[o + 1] + rgb[o + 2] + 1; r += rgb[o] / s; g += rgb[o + 1] / s; n++; }
+    return n ? [r / n, g / n] : [1 / 3, 1 / 3]; })();
+  const isPaper = (x, y) => {
+    if (x < 2 || y < 2 || x > w - 3 || y > h - 3) return false;
+    let R = 0, Gs = 0, B = 0;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const o = ((y + dy) * w + x + dx) * 4; R += rgb[o]; Gs += rgb[o + 1]; B += rgb[o + 2]; }
+    const s = R + Gs + B + 1, cr = R / s, cg = Gs / s;
+    return gray[y * w + x] >= 0.8 * ref && Math.abs(cr - pc[0]) + Math.abs(cg - pc[1]) + Math.abs(cr + cg - pc[0] - pc[1]) < 0.05;
+  };
+  for (const L of lines) {
+    const seg = clipLineToQuad(L, q);
+    if (!seg) continue;
+    const [p0, p1] = seg, len = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+    if (len < 0.5 * size) continue;
+    // 양 끝이 마주 보는 두 변 위에 있고, 나머지 두 변과 나란해야 한다
+    const sideOf = (p) => { let bk = -1, bd = Infinity; for (let k = 0; k < 4; k++) { const d = distToSegment(p, q[k], q[(k + 1) % 4]); if (d < bd) { bd = d; bk = k; } } return bk; };
+    const k0 = sideOf(p0), k1 = sideOf(p1);
+    if (k0 < 0 || k1 < 0 || (k0 + 2) % 4 !== k1) continue;
+    const dirL = Math.atan2(p1[1] - p0[1], p1[0] - p0[0]);
+    let par = 90, mid = [(p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2], near = Infinity;
+    for (const k of [(k0 + 1) % 4, (k0 + 3) % 4]) {
+      const a = q[k], b = q[(k + 1) % 4], ds = Math.atan2(b[1] - a[1], b[0] - a[0]);
+      let d = Math.abs(((dirL - ds) * 180) / Math.PI) % 180;
+      par = Math.min(par, Math.min(d, 180 - d));
+      near = Math.min(near, distToSegment(mid, a, b));
+    }
+    if (par > 10 || near < 0.15 * size) continue;
+    let hits = 0, cnt = 0, both = 0, bn = 0;
+    for (let j = 2; j < 39; j++) {
+      const t = j / 40, x = Math.round(p0[0] + (p1[0] - p0[0]) * t), y = Math.round(p0[1] + (p1[1] - p0[1]) * t);
+      if (x < 1 || y < 1 || x > w - 2 || y > h - 2) continue;
+      cnt++;
+      let m = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const i = (y + dy) * w + x + dx; m = Math.max(m, Math.abs(G.gx[i] * L.c + G.gy[i] * L.s)); }
+      if (m >= 4) hits++;
+      if (j % 3) continue;
+      // 선 양쪽(가까이와 조금 멀리) 모두 종이인가: 펼친 책·겹친 종이는 그렇고, 색 띠·사진 가장자리는 한쪽이 종이가 아니다
+      bn++;
+      let ok = true;
+      for (const d of [0.04, 0.08]) for (const sg of [1, -1]) if (!isPaper(Math.round(x + sg * L.c * d * size), Math.round(y + sg * L.s * d * size))) ok = false;
+      if (ok) both++;
+    }
+    if (cnt >= 20) { const sup = hits / cnt; best = Math.max(best, sup); if (bn && both / bn >= 0.6) bestPaper = Math.max(bestPaper, sup); }
+  }
+  return { any: best, paper: bestPaper };
+}
+// 사진 전체에서 '종이' 기준: 가장 밝은 쪽(95%) 밝기와 그 근처 화소들의 색 비율
+function globalPaper(gray, rgb, w, h) {
+  const n = w * h, hist = new Int32Array(256);
+  for (let i = 0; i < n; i++) hist[gray[i]]++;
+  let acc = 0, p95 = 255;
+  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= 0.95 * n) { p95 = v; break; } }
+  const rs = [], gs = [];
+  for (let i = 0; i < n; i += 3) if (gray[i] >= 0.9 * p95) { const o = i * 4, s = rgb[o] + rgb[o + 1] + rgb[o + 2] + 1; rs.push(rgb[o] / s); gs.push(rgb[o + 1] / s); }
+  const med = (a) => (a.length ? Float64Array.from(a).sort()[a.length >> 1] : 1 / 3);
+  return { level: Math.max(p95, 1), cr: med(rs), cg: med(gs) };
+}
+/**
+ * 후보 사각형 바깥의 증거 (확신도에만 쓴다):
+ *  - cont: 바깥 띠가 '같은 종이 + 글자'인 변의 수 → 그 변은 문서 한가운데를 자른 것 (문서 속 색 띠·제목 아래를 잡음)
+ *  - inRel: 안쪽 종이 밝기 ÷ 사진의 종이 밝기 → 낮으면 안쪽이 종이가 아니다 (색 띠·사진만 잡음)
+ *  - border: 사진 가장자리 띠가 종이인 비율 → 높으면 종이가 사진을 꽉 채웠다
+ */
+function outsideEvidence(q, G, gray, rgb, w, h, ref, gp, raw) {
+  const big = Math.max(w, h);
+  const isPaper = (x, y) => {
+    let r = 0, g = 0, b = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const o = ((y + dy) * w + x + dx) * 4; r += rgb[o]; g += rgb[o + 1]; b += rgb[o + 2]; }
+    const s = r + g + b + 1, cr = r / s, cg = g / s;
+    return gray[y * w + x] >= 0.8 * gp.level && Math.abs(cr - gp.cr) + Math.abs(cg - gp.cg) + Math.abs(cr + cg - gp.cr - gp.cg) < 0.05;
+  };
+  const textured = (x, y) => { // 가까이에 글자 같은 진한 획 (원래 밝기의 작은 범위 최대-최소)
+    let lo = 255, hi = 0;
+    for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < w && yy < h) { const v = raw[yy * w + xx]; if (v < lo) lo = v; if (v > hi) hi = v; } }
+    return hi - lo >= 60;
+  };
+  let cont = 0;
+  const sides = [];
+  for (let k = 0; k < 4; k++) {
+    const a = q[k], b = q[(k + 1) % 4], L = Math.hypot(b[0] - a[0], b[1] - a[1]), nx = (b[1] - a[1]) / L, ny = -(b[0] - a[0]) / L; // 바깥 방향
+    let n = 0, pap = 0, tex = 0;
+    for (let j = 1; j < 16; j++) for (const d of [0.025, 0.045, 0.065]) {
+      const t = j / 16, x = Math.round(a[0] + (b[0] - a[0]) * t + nx * d * big), y = Math.round(a[1] + (b[1] - a[1]) * t + ny * d * big);
+      if (x < 1 || y < 1 || x > w - 2 || y > h - 2) continue;
+      n++;
+      if (isPaper(x, y)) { pap++; if (textured(x, y)) tex++; }
+    }
+    const sp = n >= 9 ? pap / n : 0, st = n >= 9 ? tex / n : 0;
+    sides.push([+sp.toFixed(2), +st.toFixed(2)]);
+    if (sp >= 0.6 && st >= 0.15) cont++;
+  }
+  let bn = 0, bp = 0;
+  const bd = Math.max(2, Math.round(0.015 * big));
+  for (let j = 0; j < 40; j++) {
+    const t = (j + 0.5) / 40;
+    for (const [x, y] of [[Math.round(t * (w - 1)), bd], [Math.round(t * (w - 1)), h - 1 - bd], [bd, Math.round(t * (h - 1))], [w - 1 - bd, Math.round(t * (h - 1))]]) {
+      if (x < 1 || y < 1 || x > w - 2 || y > h - 2) continue;
+      bn++; if (isPaper(x, y)) bp++;
+    }
+  }
+  return { cont, inRel: ref / gp.level, border: bn ? bp / bn : 0, sides };
+}
+// 한 가지 기울기(G)·밝기(clean)로 후보에 점수를 매기고 가장 나은 것과 확신도 특징을 구한다
+function judge(candidates, lines, G, clean, sat, sm, w, h) {
+  const scored = [];
+  for (const quad of candidates) {
+    const r = quadScore(quad, G, clean, w, h);
+    if (!r) continue;
+    // 안쪽이 종이가 아닌 것(식탁보·책상)을 많이 품은 사각형은 감점
+    const pf = interiorPaperFraction(r.q, G, clean, sm.data, w, h, interiorPaperLevel(r.q, clean, w, h));
+    r.paper = pf.interior; r.edgePaper = pf.edge; r.patternSides = pf.patternSides; r.sideInfo = pf.sideInfo; // 고르는 데는 쓰지 않고 확신도에만 쓴다
+    scored.push(r);
+  }
+  scored.sort((a, b) => b.score - a.score);
+  // 겹친 종이: 위 종이의 가장자리가 후보 안을 가로지르면 '확인 필요'로 (고르는 순서는 바꾸지 않는다)
+  if (scored[0]) scored[0].crossed = crossedByPaperEdge(scored[0].q, lines, G, clean, sat, w, h, interiorPaperLevel(scored[0].q, clean, w, h));
+  const best = scored[0];
+  if (!best || best.mean < 0.35) return { scored, best: null };
+  // 확신도: 네 변이 얼마나 또렷한지, 비슷하게 그럴듯한 다른 사각형이 있는지, 안쪽·변 안쪽이 종이 같은지, 겹친 종이·무늬 흔적
+  const second = scored.find((r) => r !== best && quadIoU(r.q, best.q) < 0.9);
+  const margin = second ? 1 - second.score / best.score : 1;
+  const ref = interiorPaperLevel(best.q, clean, w, h);
+  const oe = outsideEvidence(best.q, G, clean, sm.data, w, h, ref, globalPaper(clean, sm.data, w, h), grayOf(sm.data, w * h));
+  const sm2 = seamStrength(best.q, lines, G, w, h, clean, sm.data, ref);
+  const f = { mean: best.mean, minS: best.minS, end: best.endPenalty, gap: best.gapPenalty, margin, crossed: best.crossed ? 1 : 0, paper: best.paper, edgePaper: best.edgePaper, pattern: best.patternSides,
+    cont: oe.cont, inRel: +oe.inRel.toFixed(3), border: +oe.border.toFixed(3), sides: oe.sides, area: +(polyArea(best.q) / (w * h)).toFixed(3),
+    seam: +sm2.any.toFixed(2), seamPaper: +sm2.paper.toFixed(2), edgeSides: best.sideInfo };
+  return { scored, best, f, confidence: confidenceOf(f) };
+}
+function planeGradient(p0, w, h) {
+  const p = blurPlane(p0, w, h, 1.4), n = w * h, gx = new Float32Array(n), gy = new Float32Array(n), mag = new Float32Array(n);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    gx[i] = (p[i - w + 1] + 2 * p[i + 1] + p[i + w + 1] - p[i - w - 1] - 2 * p[i - 1] - p[i + w - 1]) / 4;
+    gy[i] = (p[i + w - 1] + 2 * p[i + w] + p[i + w + 1] - p[i - w - 1] - 2 * p[i - w] - p[i - w + 1]) / 4;
+    mag[i] = Math.hypot(gx[i], gy[i]);
+  }
+  return { gx, gy, mag };
 }
 
 /** 사진(RGBA)에서 문서 네 모서리 [tl,tr,br,bl]와 확신도(0~1). 못 찾으면 null */
@@ -940,32 +1176,26 @@ function findDocument(img, debug, preview) {
   const sm = { data: sm0.data, w: sm0.w, h: sm0.h, scale: md.scale * sm0.scale }, w = sm.w, h = sm.h;
   if (w < 24 || h < 24) return null;
   const G = colorGradient(sm, w, h);
-  const { quads, clean, sat } = contourQuads(sm, w, h);
+  const { quads, clean, sat, oc } = contourQuads(sm, w, h);
   const lines = houghLines(G, w, h, 36);
-  const candidates = quads.concat(lineQuads(lines, w, h));
-  const scored = [];
-  for (const quad of candidates) {
-    const r = quadScore(quad, G, clean, w, h);
-    if (!r) continue;
-    // 안쪽이 종이가 아닌 것(식탁보·책상)을 많이 품은 사각형은 감점
-    const pf = interiorPaperFraction(r.q, G, clean, sm.data, w, h, interiorPaperLevel(r.q, clean, w, h));
-    r.paper = pf.interior; r.edgePaper = pf.edge; r.patternSides = pf.patternSides; // 고르는 데는 쓰지 않고 확신도에만 쓴다
-    scored.push(r);
+  let J = judge(quads.concat(lineQuads(lines, w, h)), lines, G, clean, sat, sm, w, h);
+  // 자신이 없으면(무늬 식탁보 등): 작은 무늬를 지운 그림의 에지로 다시 판단해 훨씬 나으면 그쪽을 쓴다
+  // (무늬 흔적이 있거나 안쪽이 종이 같지 않을 때만. 바깥 증거로 일부러 낮춘 결과는 그대로 둔다)
+  if (!J.best || (J.confidence < 0.35 && (J.f.pattern >= 1 || J.f.paper < 0.5))) {
+    const G2 = planeGradient(oc, w, h), lines2 = houghLines(G2, w, h, 36);
+    const J2 = judge(quads.concat(lineQuads(lines2, w, h)), lines2, G2, oc, sat, sm, w, h);
+    // 무늬 위에서 찾은 것은 맞을 때가 많지만 모서리가 조금 어긋날 수 있어 늘 '확인 필요'로 보여 준다
+    // 단, 바깥으로 종이가 이어지는 변이 있거나(문서 속 빈 곳·겹친 종이) 너무 작거나 사진 전체에 가까우면 받지 않는다
+    const okShape = J2.best && Math.max(...J2.f.sides.map((x) => x[0])) < 0.8 && J2.f.area >= 0.06 && J2.f.area <= 0.85;
+    if (okShape && J2.confidence > (J.best ? J.confidence : 0) + 0.15) { J = J2; J.f.patternPass = 1; J.confidence *= 0.49; }
   }
-  scored.sort((a, b) => b.score - a.score);
-  // 겹친 종이: 위 종이의 가장자리가 후보 안을 가로지르면 '확인 필요'로 (고르는 순서는 바꾸지 않는다)
-  if (scored[0]) scored[0].crossed = crossedByPaperEdge(scored[0].q, lines, G, clean, sat, w, h, interiorPaperLevel(scored[0].q, clean, w, h));
-  const best = scored[0];
-  if (debug) return { scale: sm.scale, lines: lines.length, top: scored.slice(0, 400).map((r) => ({ q: r.q.map(([x, y]) => [x / sm.scale, y / sm.scale]), score: +r.score.toFixed(4), mean: +r.mean.toFixed(2), minS: +r.minS.toFixed(2), end: +r.endPenalty.toFixed(2), gap: +r.gapPenalty.toFixed(2), paper: +r.paper.toFixed(2), edgePaper: +r.edgePaper.toFixed(2), alt: r.patternSides, crossed: !!r.crossed })) };
-  if (!best || best.mean < 0.35) return null;
-  // 확신도: 네 변이 얼마나 또렷한지, 비슷하게 그럴듯한 다른 사각형이 있는지, 안쪽·변 안쪽이 종이 같은지, 겹친 종이·무늬 흔적
-  const second = scored.find((r) => r !== best && quadIoU(r.q, best.q) < 0.9);
-  const margin = second ? 1 - second.score / best.score : 1;
-  const f = { mean: best.mean, minS: best.minS, end: best.endPenalty, gap: best.gapPenalty, margin, crossed: best.crossed ? 1 : 0, paper: best.paper, edgePaper: best.edgePaper, pattern: best.patternSides };
-  const confidence = confidenceOf(f);
-  if (confidence < 0.03) return null; // 그럴듯한 사각형이 전혀 없다
-  const coarse = best.q.map(([x, y]) => [x / sm.scale, y / sm.scale]);
-  return { corners: refineCorners(img, coarse, md), confidence, features: f };
+  if (debug) return { scale: sm.scale, lines: lines.length, top: J.scored.slice(0, 400).map((r) => ({ q: r.q.map(([x, y]) => [x / sm.scale, y / sm.scale]), score: +r.score.toFixed(4), mean: +r.mean.toFixed(2), minS: +r.minS.toFixed(2), end: +r.endPenalty.toFixed(2), gap: +r.gapPenalty.toFixed(2), paper: +r.paper.toFixed(2), edgePaper: +r.edgePaper.toFixed(2), alt: r.patternSides, crossed: !!r.crossed })) };
+  if (!J.best || J.confidence < 0.03) return null; // 그럴듯한 사각형이 전혀 없다
+  // 종이가 사진을 꽉 채워 테두리가 안 보이고, 고른 것은 문서 속 작은 색 띠·상자다 → 사진 전체를 쓴다('테두리 못 찾음')
+  if (J.f.inRel < 0.6 && J.f.area < 0.15 && J.f.border >= 0.6) return null;
+  const coarse = J.best.q.map(([x, y]) => [x / sm.scale, y / sm.scale]);
+  // 무늬 위에서는 정밀 맞춤이 무늬 선에 끌려가므로, 무늬를 지운 그림의 직선을 그대로 쓴다
+  return { corners: refineCorners(img, coarse, md), confidence: J.confidence, features: J.f };
 }
 // 두 볼록 사각형이 얼마나 겹치는지 (작은 격자로 근사)
 function quadIoU(a, b) {
@@ -1004,8 +1234,9 @@ function estimateAspect(corners, W, H, focal35) {
       (n2[1] * n3[1] - (n2[1] * n3[2] + n2[2] * n3[1]) * v0 + den * v0 * v0)) / den;
     if (f2 > 0) f = Math.sqrt(f2);
   }
-  if (focal35 > 0) f = (focal35 * L) / 36; // 사진에 적힌 초점거리(35mm 환산, 긴 변 36mm 기준)가 가장 정확하다
-  else if (!(f > 0.45 * L && f < 3 * L)) f = 0.8 * L; // 원근이 약해 추정이 불안정하면 보통 휴대폰 카메라 값
+  // 사진에 적힌 초점거리가 가장 정확하다 (35mm 환산값은 대각선 43.27mm 기준으로 정한다)
+  if (focal35 > 0) f = (focal35 * Math.hypot(W, H)) / 43.27;
+  else if (!(f > 0.3 * L && f < 3 * L)) f = 0.8 * L; // 원근이 약해 추정이 불안정하면 보통 휴대폰 카메라 값 (초광각 0.3L 까지는 믿는다)
   const nrm = (n) => { const a = (n[0] - u0 * n[2]) / f, b = (n[1] - v0 * n[2]) / f; return a * a + b * b + n[2] * n[2]; };
   const r = Math.sqrt(nrm(n3) / nrm(n2)); // 세로/가로
   return isFinite(r) && r > 0.05 && r < 20 ? r : null;
@@ -1060,33 +1291,96 @@ function pushPull(vals, mask, w, h) {
   let V = new Float32Array(w * h), Wt = new Float32Array(w * h), cw = w, ch = h;
   for (let i = 0; i < w * h; i++) if (mask[i]) { V[i] = vals[i]; Wt[i] = 1; }
   levels.push({ V, Wt, w: cw, h: ch });
-  while (cw > 1 || ch > 1) {
+  while (cw > 1 || ch > 1) { // 아래로: 2×2 칸씩 합친다
     const nw = Math.ceil(cw / 2), nh = Math.ceil(ch / 2), V2 = new Float32Array(nw * nh), W2 = new Float32Array(nw * nh);
-    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
-      const i = y * cw + x, j = (y >> 1) * nw + (x >> 1);
-      V2[j] += V[i]; W2[j] += Wt[i];
+    for (let y = 0; y < ch; y++) {
+      const ro = y * cw, rn = (y >> 1) * nw;
+      for (let x = 0; x < cw; x++) { const i = ro + x, j = rn + (x >> 1); V2[j] += V[i]; W2[j] += Wt[i]; }
     }
     V = V2; Wt = W2; cw = nw; ch = nh;
     levels.push({ V, Wt, w: cw, h: ch });
   }
-  let up = null, uw = 0, uh = 0;
-  for (let l = levels.length - 1; l >= 0; l--) {
-    const { V, Wt, w: lw, h: lh } = levels[l], out = new Float32Array(lw * lh);
-    for (let y = 0; y < lh; y++) for (let x = 0; x < lw; x++) {
-      const i = y * lw + x, wt = Wt[i];
-      let coarse = 0;
-      if (up) {
-        const fx = clamp((x + 0.5) / 2 - 0.5, 0, uw - 1), fy = clamp((y + 0.5) / 2 - 0.5, 0, uh - 1);
-        const x0 = Math.floor(fx), y0 = Math.floor(fy), x1 = Math.min(x0 + 1, uw - 1), y1 = Math.min(y0 + 1, uh - 1), ax = fx - x0, ay = fy - y0;
-        const t = up[y0 * uw + x0] + (up[y0 * uw + x1] - up[y0 * uw + x0]) * ax, b = up[y1 * uw + x0] + (up[y1 * uw + x1] - up[y1 * uw + x0]) * ax;
-        coarse = t + (b - t) * ay;
+  // 위로: 거친 단계를 늘려, 값이 없거나 적은 칸을 채운다
+  let up = levels[levels.length - 1].V.map((v, i) => v / Math.max(levels[levels.length - 1].Wt[i], 1e-9)), uw = 1, uh = 1;
+  for (let l = levels.length - 2; l >= 0; l--) {
+    const { V, Wt, w: lw, h: lh } = levels[l], out = new Float32Array(lw * lh), AX = bilinearAxis(uw, 2 * uw), AY = bilinearAxis(uh, 2 * uh), R = new Float32Array(uw);
+    for (let y = 0; y < lh; y++) {
+      const r0 = AY.i0[y] * uw, r1 = AY.i1[y] * uw, ay = AY.a[y];
+      for (let x = 0; x < uw; x++) R[x] = up[r0 + x] + (up[r1 + x] - up[r0 + x]) * ay;
+      for (let x = 0, i = y * lw; x < lw; x++, i++) {
+        const x0 = AX.i0[x], coarse = R[x0] + (R[AX.i1[x]] - R[x0]) * AX.a[x], wt = Wt[i];
+        if (wt <= 0) out[i] = coarse;
+        else { const a = wt < 1 ? wt : 1; out[i] = a * (V[i] / wt) + (1 - a) * coarse; }
       }
-      if (wt <= 0) out[i] = coarse;
-      else { const own = V[i] / wt, a = Math.min(1, wt); out[i] = up ? a * own + (1 - a) * coarse : own; }
     }
     up = out; uw = lw; uh = lh;
   }
   return up;
+}
+
+/**
+ * 회색 인쇄 찾기 (반 크기, 글자를 지운 밝기 F 에서):
+ * 표 머리 칸·회색 상자·흑백 사진·막대그래프처럼 종이보다 어두운 평평한 영역은 '날카로운 경계'로 둘러싸여 있다.
+ * 그림자는 경계가 흐리거나(부드러운 그림자), 쪽 밖의 물건이 드리우므로 쪽 가장자리에 닿는다(날카로운 그림자).
+ * → 날카로운 경계로 둘러싸이고 가장자리에 닿지 않으며 주변 종이보다 어두운 영역을 인쇄로 보고 지우지 않는다.
+ * 돌려주는 값: 인쇄이면 1 (경계 2칸 포함)
+ */
+function grayPrintMask(F, w, h, raw) {
+  const n = w * h, E = new Uint8Array(n), big = Math.max(w, h), span = 5;
+  // 잡음 크기: 원래 밝기에서 이웃 화소 차이의 중앙값 (어두운 사진일수록 크다) → 잡음보다 뚜렷한 계단·차이만 본다
+  const dh = new Float64Array(256);
+  let dn = 0;
+  for (let i = 0; i + 1 < n; i += 3) { dh[Math.abs(raw[i + 1] - raw[i])]++; dn++; }
+  let acc = 0, md = 0;
+  for (; md < 255; md++) { acc += dh[md]; if (acc >= dn / 2) break; }
+  const minStep = Math.max(5, 1.5 * md);
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    const gx = (F[i - w + 1] + 2 * F[i + 1] + F[i + w + 1] - F[i - w - 1] - 2 * F[i - 1] - F[i + w - 1]) / 8;
+    const gy = (F[i + w - 1] + 2 * F[i + w] + F[i + w + 1] - F[i - w - 1] - 2 * F[i - w] - F[i - w + 1]) / 8;
+    const mag = Math.hypot(gx, gy);
+    if (mag < 0.6) continue;
+    // 경계 양쪽(±span칸)의 밝기 차이 C. 계단(인쇄·날카로운 그림자)은 기울기가 C/span 보다 훨씬 크고, 완만한 그림자는 비슷하다
+    const ux = gx / mag, uy = gy / mag;
+    const ax = clamp(Math.round(x + ux * span), 0, w - 1), ay = clamp(Math.round(y + uy * span), 0, h - 1);
+    const bx = clamp(Math.round(x - ux * span), 0, w - 1), by = clamp(Math.round(y - uy * span), 0, h - 1);
+    const C = Math.abs(F[ay * w + ax] - F[by * w + bx]);
+    if (C >= minStep && mag >= C / 6) E[i] = 1;
+  }
+  const Ed = dilate(E, w, h, 3), free = new Uint8Array(n);
+  for (let i = 0; i < n; i++) free[i] = Ed[i] ? 0 : 1;
+  const { labels, counts, n: nc } = components(free, w, h, false);
+  const x0 = new Int32Array(nc + 1).fill(1e9), x1 = new Int32Array(nc + 1).fill(-1), y0 = new Int32Array(nc + 1).fill(1e9), y1 = new Int32Array(nc + 1).fill(-1);
+  const hist = new Map();
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const l = labels[y * w + x];
+    if (!l) continue;
+    if (x < x0[l]) x0[l] = x; if (x > x1[l]) x1[l] = x; if (y < y0[l]) y0[l] = y; if (y > y1[l]) y1[l] = y;
+  }
+  const edgeM = Math.max(2, Math.round(0.015 * big)), minArea = Math.max(30, 0.0002 * n);
+  const touches = (l) => x0[l] <= edgeM || y0[l] <= edgeM || x1[l] >= w - 1 - edgeM || y1[l] >= h - 1 - edgeM;
+  const isPrint = new Uint8Array(nc + 1);
+  // 쪽 가장자리에 닿는 덩어리 = 종이(그늘 포함). 그 밝기를 주변 종이 기준으로 쓴다
+  const paperLab = new Uint8Array(nc + 1);
+  for (let l = 1; l <= nc; l++) if (touches(l) && counts[l] >= minArea) paperLab[l] = 1;
+  const pad = Math.round(0.04 * big), med = (a) => (a.length ? Float64Array.from(a).sort()[a.length >> 1] : 0);
+  const all = [];
+  for (let i = 0; i < n; i += 7) if (paperLab[labels[i]]) all.push(F[i]);
+  const globalPaper = med(all); // 둘레에 종이가 없으면(사진 속 지붕 등) 쪽 전체의 종이 밝기와 비교
+  for (let l = 1; l <= nc; l++) {
+    if (paperLab[l] || counts[l] < minArea || counts[l] > 0.85 * n) continue;
+    const inside = [], around = [], st = Math.max(1, Math.round(Math.sqrt(counts[l]) / 40));
+    const X0 = Math.max(0, x0[l] - pad), X1 = Math.min(w - 1, x1[l] + pad), Y0 = Math.max(0, y0[l] - pad), Y1 = Math.min(h - 1, y1[l] + pad);
+    const st2 = Math.max(1, Math.round(Math.sqrt((X1 - X0 + 1) * (Y1 - Y0 + 1)) / 60));
+    for (let y = y0[l]; y <= y1[l]; y += st) for (let x = x0[l]; x <= x1[l]; x += st) if (labels[y * w + x] === l) inside.push(F[y * w + x]);
+    for (let y = Y0; y <= Y1; y += st2) for (let x = X0; x <= X1; x += st2) { const q = labels[y * w + x]; if (q && paperLab[q]) around.push(F[y * w + x]); }
+    if (!inside.length) continue;
+    const a = around.length >= 8 ? med(around) : globalPaper, b = med(inside);
+    if (b < a * 0.97 && a - b >= minStep) isPrint[l] = 1;
+  }
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (isPrint[labels[i]]) out[i] = 1;
+  return dilate(out, w, h, 5); // 경계(계단) 부분까지
 }
 
 /**
@@ -1095,7 +1389,7 @@ function pushPull(vals, mask, w, h) {
  *    (그림자 진 종이는 종이, 사진·색 박스·검은 띠는 종이 아님)
  *  - 종이인 곳의 밝기만으로 조명(배경)을 추정하고 나머지는 주변 값으로 메운다
  */
-function paperModel(img) {
+function paperModel(img, print, pw, ph) {
   const sm = resizeArea(img, BG_SIDE), w = sm.w, h = sm.h, n = w * h, d = sm.data, big = Math.max(w, h);
   const k = odd(big / 40);
   const ch = [0, 1, 2].map((c) => closeOp(planeOf(d, n, c), w, h, k));
@@ -1112,18 +1406,25 @@ function paperModel(img) {
   const tex = boxBlurU8(gm, w, h, 2);
   // 주변 종이 밝기: 넓은 범위의 가장 밝은 값을 부드럽게
   const er = Math.max(1, Math.round(big / 52)), env = boxBlurU8(boxBlurU8(boxBlurU8(dilate(Y, w, h, odd(big / 8)), w, h, er), w, h, er), w, h, er);
-  // 종이의 색: 밝은 곳의 색 비율(r:g:b) 중앙값. 누런 조명이면 종이도 누렇다 → '종이 색과 얼마나 다른지'로 본다
+  // 회색 인쇄(반 크기 지도)를 이 크기로
+  const printM = new Uint8Array(n);
+  if (print) {
+    const sx = pw / w, sy = ph / h;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (print[Math.min(ph - 1, ((y + 0.5) * sy) | 0) * pw + Math.min(pw - 1, ((x + 0.5) * sx) | 0)]) printM[y * w + x] = 255;
+  }
+  // 종이의 색: 밝은 곳(인쇄 영역 제외)의 색 비율(r:g:b) 중앙값. 누런 조명이면 종이도 누렇다 → '종이 색과 얼마나 다른지'로 본다
   const chroma = (i) => { const s = ch[0][i] + ch[1][i] + ch[2][i] + 1; return [ch[0][i] / s, ch[1][i] / s]; };
-  const rs = [], gs = [];
-  for (let i = 0; i < n; i += 3) if (Y[i] > 0.8 * env[i]) { const c = chroma(i); rs.push(c[0]); gs.push(c[1]); }
-  const med = (a) => (a.length ? a.sort((x, y) => x - y)[a.length >> 1] : 1 / 3);
+  const rs = [], gs = [], lv = [];
+  for (let i = 0; i < n; i += 3) if (Y[i] > 0.8 * env[i] && !printM[i]) { const c = chroma(i); rs.push(c[0]); gs.push(c[1]); lv.push(Y[i]); }
+  const med = (a) => (a.length ? Float64Array.from(a).sort()[a.length >> 1] : 1 / 3);
   const pr = med(rs), pg = med(gs);
   const dist = new Float32Array(n), ds = [];
   const cd = (r, g, b) => { const s = r + g + b + 1, a = r / s, c = g / s; return Math.abs(a - pr) + Math.abs(c - pg) + Math.abs(1 - a - c - (1 - pr - pg)); };
   // 글자를 지운 색과 원래 색 중 더 다른 쪽을 본다 (흰 글씨가 든 색 띠도 통째로 '종이 아님'이 되게)
   for (let i = 0, j = 0; i < n; i++, j += 4) dist[i] = Math.max(cd(ch[0][i], ch[1][i], ch[2][i]), rawY[i] > 40 ? cd(d[j], d[j + 1], d[j + 2]) : 0);
-  for (let i = 0; i < n; i += 3) if (Y[i] > 0.8 * env[i]) ds.push(dist[i]);
-  const colThr = Math.max(0.03, 3 * med(ds)); // 종이 색 흔들림의 3배보다 다르면 색 있는 내용 (옅은 색 칸도 지킨다)
+  for (let i = 0; i < n; i += 3) if (Y[i] > 0.8 * env[i] && !printM[i]) ds.push(dist[i]);
+  const spread = med(ds), level = med(lv);
+  const colThr = Math.max(0.03, 3 * spread); // 종이 색 흔들림의 3배보다 다르면 색 있는 내용 (옅은 색 칸도 지킨다)
   // 색이 다르거나 아주 어두운 곳(색 띠·검은 띠·사진)과, 거친 곳(사진)을 따로 본다.
   // 거친 곳은 넓은 덩어리만 남긴다 → 그림자 경계처럼 가늘고 긴 선은 종이로 남아 정밀 보정을 받는다
   const colored = new Uint8Array(n), rough = new Uint8Array(n);
@@ -1132,20 +1433,37 @@ function paperModel(img) {
     rough[i] = tex[i] > 6 ? 255 : 0;
   }
   const c1 = openOp(colored, w, h, odd(big / 90)), r1 = openOp(rough, w, h, odd(big / 40));
+  // 내용의 핵심: 색·아주 어두운 곳·회색 인쇄. 그 안에 갇힌 작은 '종이' 구멍(검은 띠 속 흰 글씨 등)도 내용으로 메운다
+  let content = new Uint8Array(n);
+  for (let i = 0; i < n; i++) content[i] = c1[i] | printM[i];
+  {
+    const free = new Uint8Array(n);
+    for (let i = 0; i < n; i++) free[i] = content[i] ? 0 : 1;
+    const { labels: hl, counts: hc, n: hn } = components(free, w, h, false), edge = new Uint8Array(hn + 1);
+    for (let x = 0; x < w; x++) { edge[hl[x]] = 1; edge[hl[(h - 1) * w + x]] = 1; }
+    for (let y = 0; y < h; y++) { edge[hl[y * w]] = 1; edge[hl[y * w + w - 1]] = 1; }
+    for (let i = 0; i < n; i++) { const l = hl[i]; if (l && !edge[l] && hc[l] < 0.02 * n) content[i] = 255; }
+  }
+  // 종이가 아닌 곳 = 내용 + 거친 곳(사진). 거칠기만 한 곳은 톤은 종이처럼 맞춘다 (어두운 사진 속 종이 잡음일 수 있다)
   let notPaper = new Uint8Array(n);
-  for (let i = 0; i < n; i++) notPaper[i] = c1[i] | r1[i];
+  for (let i = 0; i < n; i++) notPaper[i] = content[i] | r1[i];
+  content = dilate(content, w, h, 3);
   notPaper = dilate(notPaper, w, h, 3); // 사진 가장자리는 조금 넓힌다
   const paper = new Uint8Array(n);
   let paperCount = 0;
   for (let i = 0; i < n; i++) if (!notPaper[i]) { paper[i] = 1; paperCount++; }
   let bg;
-  if (paperCount < 0.03 * n) {
-    // 거의 사진뿐인 쪽: 나누지 말고 흰색 맞춤만 한다
-    bg = ch.map((p) => { const s = Uint8Array.from(p).sort(); const v = Math.max(1, s[Math.floor(s.length * 0.98)]); return new Uint8ClampedArray(n).fill(v); });
+  // 사진만 있는 쪽(종이로 보이는 곳의 색이 제각각)이나 아주 어두운 사진(종이 밝기 40 미만)은 조명을 나누지 않는다:
+  // 나누면 사진이 하얀 종이처럼 날아가거나 잡음이 하얗게 부푼다. 밝기만 가볍게 맞추고(어두운 사진은 그대로) 색은 그대로 둔다
+  const photoPage = paperCount < 0.03 * n || spread > 0.03 || level < 40;
+  if (photoPage) {
+    const v = Math.max(160, Uint8Array.from(Y).sort()[Math.floor(n * 0.99)]);
+    bg = [0, 1, 2].map(() => new Uint8ClampedArray(n).fill(v));
+    notPaper.fill(255); content.fill(255);
   } else {
     bg = ch.map((p) => toU8(blurPlane(pushPull(p, paper, w, h), w, h, 1.2)));
   }
-  return { w, h, bg, notPaper, tex, Y, rawY };
+  return { w, h, bg, notPaper, content, tex, Y, rawY, spread, level, photoPage };
 }
 
 function percentileOf(hist, total, p) {
@@ -1165,46 +1483,100 @@ function levelsLut(black, white, gamma) {
 // 작은 그림에서 구한 조명은 그림자 경계가 뭉개진다. 그래서 반 크기에서 '글자만 지운 밝기 ÷ 거친 조명'(그림자 세기 지도)을
 // 종이에서 구하고, 사진·색 띠 자리는 주변 종이 값으로 매끄럽게 채워 페이지 전체에 고르게 적용한다.
 // (경계에서 켜고 끄지 않으므로 얼룩이 생기지 않고, 색 띠·사진 위에 걸친 그림자도 함께 지워진다)
-function upsampleF(src, sw, sh, W, H) {
-  const out = new Float32Array(W * H);
-  for (let y = 0; y < H; y++) {
-    const fy = clamp(((y + 0.5) * sh) / H - 0.5, 0, sh - 1), y0 = Math.floor(fy), y1 = Math.min(y0 + 1, sh - 1), ay = fy - y0;
-    for (let x = 0; x < W; x++) {
-      const fx = clamp(((x + 0.5) * sw) / W - 0.5, 0, sw - 1), x0 = Math.floor(fx), x1 = Math.min(x0 + 1, sw - 1), ax = fx - x0;
-      const t = src[y0 * sw + x0] + (src[y0 * sw + x1] - src[y0 * sw + x0]) * ax, b = src[y1 * sw + x0] + (src[y1 * sw + x1] - src[y1 * sw + x0]) * ax;
-      out[y * W + x] = t + (b - t) * ay;
+// 작은 격자(sw 칸)를 큰 크기(W 칸)로 늘릴 때 칸마다 쓸 이웃 두 칸과 비율 (화소 중심을 맞춘다)
+function bilinearAxis(sw, W) {
+  const i0 = new Int32Array(W), i1 = new Int32Array(W), a = new Float32Array(W);
+  for (let x = 0; x < W; x++) {
+    const f = clamp(((x + 0.5) * sw) / W - 0.5, 0, sw - 1), x0 = Math.floor(f);
+    i0[x] = x0; i1[x] = Math.min(x0 + 1, sw - 1); a[x] = f - x0;
+  }
+  return { i0, i1, a };
+}
+function divideByPaper(img, model, half, fineH, print) {
+  const { w, h } = img, n = w * h, d = img.data, out = new Uint8ClampedArray(n * 4), mw = model.w, mh = model.h;
+  half = half || resizeArea(img, Math.max(64, Math.round(Math.max(w, h) / 2)));
+  const HW = half.w, HH = half.h, hn = HW * HH;
+  fineH = fineH || closeOp(grayOf(half.data, hn), HW, HH, odd(Math.max(HW, HH) / 110));
+  const [B0, B1, B2] = model.bg, np = model.notPaper;
+  const coarseY = new Float32Array(mw * model.h); // 거친 조명의 밝기
+  for (let i = 0; i < coarseY.length; i++) coarseY[i] = (B0[i] * 77 + B1[i] * 150 + B2[i] * 29) / 256;
+  // 반 크기: '글자만 지운 밝기 ÷ 거친 조명' (그림자 세기 지도). 종이에서만 구하고 나머지는 메운다
+  const gH = new Float32Array(hn), paperH = new Uint8Array(hn), sx = mw / HW, sy = mh / HH;
+  const AXh = bilinearAxis(mw, HW), AYh = bilinearAxis(mh, HH);
+  let any = false;
+  for (let y = 0; y < HH; y++) {
+    const r0 = AYh.i0[y] * mw, r1 = AYh.i1[y] * mw, ay = AYh.a[y], ny = Math.min(mh - 1, (y * sy) | 0) * mw;
+    for (let x = 0; x < HW; x++) {
+      const x0 = AXh.i0[x], x1 = AXh.i1[x], ax = AXh.a[x];
+      const t = coarseY[r0 + x0] + (coarseY[r0 + x1] - coarseY[r0 + x0]) * ax, bt = coarseY[r1 + x0] + (coarseY[r1 + x1] - coarseY[r1 + x0]) * ax;
+      const coarse = t + (bt - t) * ay, i = y * HW + x;
+      gH[i] = clamp(fineH[i] / Math.max(coarse, 1), 0.3, 1.6);
+      if (!np[ny + Math.min(mw - 1, (x * sx) | 0)] && !(print && print[i])) { paperH[i] = 1; any = true; }
+    }
+  }
+  const gS = any ? blurPlane(pushPull(gH, paperH, HW, HH), HW, HH, 1.0) : new Float32Array(hn).fill(1);
+  // 원래 크기: 종이 부분은 여기서 바로 계산해 그림자 경계를 날카롭게, 사진·색 띠 자리는 반 크기 지도를 늘려 쓴다
+  const fineF = closeOp(grayOf(d, n), w, h, odd(Math.max(w, h) / 110)), mx = mw / w, my = mh / h;
+  const AX = bilinearAxis(mw, w), AY = bilinearAxis(mh, h), GX = bilinearAxis(HW, w), GY = bilinearAxis(HH, h);
+  const nx = new Int32Array(w), px = new Int32Array(w), pr = print || new Uint8Array(hn);
+  for (let x = 0; x < w; x++) { nx[x] = Math.min(mw - 1, (x * mx) | 0); px[x] = Math.min(HW - 1, ((x * HW) / w) | 0); }
+  const R0 = new Float32Array(mw), R1 = new Float32Array(mw), R2 = new Float32Array(mw), RG = new Float32Array(HW);
+  for (let y = 0; y < h; y++) {
+    // 이 줄에 해당하는 조명 값을 세로로 먼저 섞어 두고, 화소마다는 가로로만 섞는다
+    const r0 = AY.i0[y] * mw, r1 = AY.i1[y] * mw, ay = AY.a[y], ny = Math.min(mh - 1, (y * my) | 0) * mw, py = Math.min(HH - 1, ((y * HH) / h) | 0) * HW;
+    for (let x = 0; x < mw; x++) {
+      R0[x] = B0[r0 + x] + (B0[r1 + x] - B0[r0 + x]) * ay;
+      R1[x] = B1[r0 + x] + (B1[r1 + x] - B1[r0 + x]) * ay;
+      R2[x] = B2[r0 + x] + (B2[r1 + x] - B2[r0 + x]) * ay;
+    }
+    const g0 = GY.i0[y] * HW, g1 = GY.i1[y] * HW, gy = GY.a[y];
+    for (let x = 0; x < HW; x++) RG[x] = gS[g0 + x] + (gS[g1 + x] - gS[g0 + x]) * gy;
+    for (let x = 0, i = y * w, j = i * 4; x < w; x++, i++, j += 4) {
+      const x0 = AX.i0[x], x1 = AX.i1[x], ax = AX.a[x];
+      const c0 = R0[x0] + (R0[x1] - R0[x0]) * ax, c1 = R1[x0] + (R1[x1] - R1[x0]) * ax, c2 = R2[x0] + (R2[x1] - R2[x0]) * ax;
+      let gi;
+      if (!np[ny + nx[x]] && !pr[py + px[x]]) {
+        const coarse = (c0 * 77 + c1 * 150 + c2 * 29) / 256;
+        gi = fineF[i] / (coarse > 1 ? coarse : 1);
+        gi = gi < 0.3 ? 0.3 : gi > 1.6 ? 1.6 : gi;
+      } else {
+        const u0 = GX.i0[x], u1 = GX.i1[x];
+        gi = RG[u0] + (RG[u1] - RG[u0]) * GX.a[x];
+      }
+      const m0 = c0 * gi, m1 = c1 * gi, m2 = c2 * gi;
+      out[j] = (d[j] * 255) / (m0 > 1 ? m0 : 1);
+      out[j + 1] = (d[j + 1] * 255) / (m1 > 1 ? m1 : 1);
+      out[j + 2] = (d[j + 2] * 255) / (m2 > 1 ? m2 : 1);
+      out[j + 3] = 255;
     }
   }
   return out;
 }
-function divideByPaper(img, model) {
-  const { w, h } = img, n = w * h, d = img.data, out = new Uint8ClampedArray(n * 4);
-  const half = resizeArea(img, Math.max(64, Math.round(Math.max(w, h) / 2))), HW = half.w, HH = half.h, hn = HW * HH;
-  const fineH = closeOp(grayOf(half.data, hn), HW, HH, odd(Math.max(HW, HH) / 110));
-  const bgH = model.bg.map((p) => upsamplePlane(p, model.w, model.h, HW, HH));
-  const gH = new Float32Array(hn), paperH = new Uint8Array(hn), sx = model.w / HW, sy = model.h / HH;
-  let any = false;
-  for (let y = 0; y < HH; y++) for (let x = 0; x < HW; x++) {
-    const i = y * HW + x, coarse = (bgH[0][i] * 77 + bgH[1][i] * 150 + bgH[2][i] * 29) / 256;
-    gH[i] = clamp(fineH[i] / Math.max(coarse, 1), 0.3, 1.6);
-    if (!model.notPaper[Math.min(model.h - 1, (y * sy) | 0) * model.w + Math.min(model.w - 1, (x * sx) | 0)]) { paperH[i] = 1; any = true; }
-  }
-  const gFill = upsampleF(any ? blurPlane(pushPull(gH, paperH, HW, HH), HW, HH, 1.0) : new Float32Array(hn).fill(1), HW, HH, w, h);
-  const bgs = model.bg.map((p) => upsamplePlane(p, model.w, model.h, w, h));
-  // 종이 부분은 원래 해상도에서 바로 계산해 그림자 경계를 날카롭게 맞춘다 (반 크기 값은 사진·색 띠 자리를 메우는 데만)
-  const fineF = closeOp(grayOf(d, n), w, h, odd(Math.max(w, h) / 110)), mx = model.w / w, my = model.h / h;
-  for (let i = 0, j = 0; i < n; i++, j += 4) {
-    const y = (i / w) | 0, x = i - y * w;
-    let gi = gFill[i];
-    if (!model.notPaper[Math.min(model.h - 1, (y * my) | 0) * model.w + Math.min(model.w - 1, (x * mx) | 0)]) {
-      const coarse = (bgs[0][i] * 77 + bgs[1][i] * 150 + bgs[2][i] * 29) / 256;
-      gi = fineF[i] / (coarse > 1 ? coarse : 1);
-      gi = gi < 0.3 ? 0.3 : gi > 1.6 ? 1.6 : gi;
+// 글자 잉크의 검은 수준: 종이 부분(내용 제외)의 가장 어두운 0.5% (큰 회색 상자가 '검정'이 되지 않게)
+const IDENTITY = Uint8ClampedArray.from({ length: 256 }, (_, v) => v);
+function inkBlack(Y, w, h, prep) {
+  const { content, cw, ch } = prep, hist = new Float64Array(256);
+  let ink = 0;
+  for (let y = 0; y < h; y += 2) {
+    const r = Math.min(ch - 1, ((y * ch) / h) | 0) * cw;
+    for (let x = 0; x < w; x += 2) {
+      const v = Y[y * w + x];
+      if (v < 200 && content[r + Math.min(cw - 1, ((x * cw) / w) | 0)] < 128) { hist[v]++; ink++; }
     }
-    out[j] = (d[j] * 255) / Math.max(bgs[0][i] * gi, 1);
-    out[j + 1] = (d[j + 1] * 255) / Math.max(bgs[1][i] * gi, 1);
-    out[j + 2] = (d[j + 2] * 255) / Math.max(bgs[2][i] * gi, 1);
-    out[j + 3] = 255;
+  }
+  // 글자가 거의 없으면 늘리지 않는다 (빈 종이·사진만 있는 쪽이 어두워지지 않게). 연필 글씨는 90까지만 검게 편다
+  return ink < 200 ? 30 : Math.min(percentileOf(hist, ink, 0.05), 90);
+}
+// 화소마다 종이용 톤(lutP)과 내용용 톤(lutC)을 내용 지도 비율로 섞는다
+function toneByContent(Y, w, h, prep, lutP, lutC) {
+  const n = w * h, out = new Uint8ClampedArray(n), { content, cw, ch } = prep, cx = new Int32Array(w);
+  for (let x = 0; x < w; x++) cx[x] = Math.min(cw - 1, ((x * cw) / w) | 0);
+  for (let y = 0; y < h; y++) {
+    const r = Math.min(ch - 1, ((y * ch) / h) | 0) * cw;
+    for (let x = 0, i = y * w; x < w; x++, i++) {
+      const a = content[r + cx[x]], v = Y[i];
+      out[i] = a ? (lutP[v] * (255 - a) + lutC[v] * a) / 255 : lutP[v];
+    }
   }
   return out;
 }
@@ -1212,37 +1584,59 @@ function lumaOf(d, n) { const Y = new Uint8ClampedArray(n); for (let i = 0, j = 
 
 /** 보정 → 새 RGBA {data,w,h} */
 function enhance(img, mode) {
-  const { w, h } = img, n = w * h;
-  if (mode === "original") return img;
-  const model = paperModel(img);
-  const flat = divideByPaper(img, model);
+  return mode === "original" ? img : finishEnhance(prepareEnhance(img), mode);
+}
+// 모든 보정 방식이 함께 쓰는 앞부분: 종이 모델과 조명 나누기 (방식을 바꿀 때 다시 쓸 수 있다)
+function prepareEnhance(img) {
+  const { w, h } = img;
+  const half = resizeArea(img, Math.max(64, Math.round(Math.max(w, h) / 2))), HW = half.w, HH = half.h;
+  const grayH = grayOf(half.data, HW * HH), fineH = closeOp(grayH, HW, HH, odd(Math.max(HW, HH) / 110)); // 글자만 지운 밝기
+  const print = grayPrintMask(fineH, HW, HH, grayH);
+  // 640px 종이 모델은 (충분히 크면) 반 크기 그림에서 줄여 만든다: 원본에서 바로 줄이는 것과 거의 같고 더 빠르다
+  const model = paperModel(Math.max(HW, HH) >= BG_SIDE ? half : img, print, HW, HH);
+  const flat = divideByPaper(img, model, half, fineH, print);
+  // 내용(사진·색·회색 인쇄) 지도: 톤을 맞출 때 종이만 하얗게 펴고 내용의 밝기는 지킨다 (경계는 부드럽게)
+  const content = new Uint8Array(HW * HH), sx = model.w / HW, sy = model.h / HH;
+  for (let y = 0; y < HH; y++) for (let x = 0; x < HW; x++) {
+    const i = y * HW + x;
+    content[i] = print[i] || model.content[Math.min(model.h - 1, (y * sy) | 0) * model.w + Math.min(model.w - 1, (x * sx) | 0)] ? 255 : 0;
+  }
+  return { w, h, model, flat, content: boxBlurU8(content, HW, HH, 2), cw: HW, ch: HH };
+}
+// 방식별 뒷부분 (입력은 바꾸지 않는다)
+function finishEnhance(prep, mode) {
+  const { w, h, model, flat } = prep, n = w * h;
   const sr = Math.max(1, Math.round(Math.max(w, h) / 2200)); // 선명화·잡음 제거 반지름
   if (mode === "color") {
-    const hist = new Float64Array(256), Y = lumaOf(flat, n);
-    for (let i = 0; i < n; i++) hist[Y[i]]++;
-    const lut = levelsLut(Math.min(percentileOf(hist, n, 0.005), 90), 240, 1.0);
+    const Y = lumaOf(flat, n), lut = levelsLut(inkBlack(Y, w, h, prep), 240, 1.0);
     // 밝기(Y)에만 톤을 맞추고 선명하게, 색(Cb·Cr)은 원래 값을 반 크기에서 부드럽게 → 색이 바뀌지 않고, 어두운 사진의 색 잡음은 사라진다
-    const Yl = new Uint8ClampedArray(n);
-    for (let i = 0; i < n; i++) Yl[i] = lut[Y[i]];
+    // 종이는 240 이상을 하얗게 펴고 글자를 검게, 내용(옅은 색 칸·형광펜·회색 칸·사진)은 조명만 나눈 밝기 그대로
+    const Yl = toneByContent(Y, w, h, prep, lut, IDENTITY);
     const Yb = boxBlurU8(Yl, w, h, sr);
     const hw = Math.ceil(w / 2), hh = Math.ceil(h / 2), Cb = new Float32Array(hw * hh), Cr = new Float32Array(hw * hh), cc = new Uint8Array(hw * hh);
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const j = (y * w + x) * 4, k = (y >> 1) * hw + (x >> 1);
-      const r = flat[j], g = flat[j + 1], b = flat[j + 2], yy = 0.299 * r + 0.587 * g + 0.114 * b;
-      Cb[k] += (b - yy) * 0.564; Cr[k] += (r - yy) * 0.713; cc[k]++;
+    for (let y = 0; y < h; y++) {
+      const kr = (y >> 1) * hw;
+      for (let x = 0, j = y * w * 4; x < w; x++, j += 4) {
+        const k = kr + (x >> 1), r = flat[j], g = flat[j + 1], b = flat[j + 2], yy = 0.299 * r + 0.587 * g + 0.114 * b;
+        Cb[k] += (b - yy) * 0.564; Cr[k] += (r - yy) * 0.713; cc[k]++;
+      }
     }
     const cb8 = new Uint8ClampedArray(hw * hh), cr8 = new Uint8ClampedArray(hw * hh);
     for (let k = 0; k < cc.length; k++) { cb8[k] = Cb[k] / cc[k] + 128.5; cr8[k] = Cr[k] / cc[k] + 128.5; }
     const Cbs = boxBlurU8(boxBlurU8(cb8, hw, hh, 1), hw, hh, 1), Crs = boxBlurU8(boxBlurU8(cr8, hw, hh, 1), hw, hh, 1);
-    const out = new Uint8ClampedArray(n * 4);
+    const out = new Uint8ClampedArray(n * 4), AX = bilinearAxis(hw, 2 * hw), AY = bilinearAxis(hh, 2 * hh);
+    const RB = new Float32Array(hw), RR = new Float32Array(hw);
     for (let y = 0; y < h; y++) {
-      const fy = clamp((y + 0.5) / 2 - 0.5, 0, hh - 1), y0 = Math.floor(fy), y1 = Math.min(y0 + 1, hh - 1), ay = fy - y0;
-      for (let x = 0; x < w; x++) {
-        const fx = clamp((x + 0.5) / 2 - 0.5, 0, hw - 1), x0 = Math.floor(fx), x1 = Math.min(x0 + 1, hw - 1), ax = fx - x0;
-        const a = y0 * hw + x0, b = y0 * hw + x1, c = y1 * hw + x0, e = y1 * hw + x1;
-        const cb = (Cbs[a] * (1 - ax) + Cbs[b] * ax) * (1 - ay) + (Cbs[c] * (1 - ax) + Cbs[e] * ax) * ay - 128;
-        const cr = (Crs[a] * (1 - ax) + Crs[b] * ax) * (1 - ay) + (Crs[c] * (1 - ax) + Crs[e] * ax) * ay - 128;
-        const i = y * w + x, yy = Yl[i] + 0.6 * (Yl[i] - Yb[i]), o = i * 4;
+      // 이 줄의 색(Cb·Cr)을 세로로 먼저 섞어 두고, 화소마다는 가로로만 섞는다
+      const r0 = AY.i0[y] * hw, r1 = AY.i1[y] * hw, ay = AY.a[y];
+      for (let x = 0; x < hw; x++) {
+        RB[x] = Cbs[r0 + x] + (Cbs[r1 + x] - Cbs[r0 + x]) * ay - 128;
+        RR[x] = Crs[r0 + x] + (Crs[r1 + x] - Crs[r0 + x]) * ay - 128;
+      }
+      for (let x = 0, i = y * w, o = i * 4; x < w; x++, i++, o += 4) {
+        const x0 = AX.i0[x], x1 = AX.i1[x], ax = AX.a[x];
+        const cb = RB[x0] + (RB[x1] - RB[x0]) * ax, cr = RR[x0] + (RR[x1] - RR[x0]) * ax;
+        const yy = Yl[i] + 0.6 * (Yl[i] - Yb[i]);
         out[o] = yy + 1.402 * cr; out[o + 1] = yy - 0.344136 * cb - 0.714136 * cr; out[o + 2] = yy + 1.772 * cb; out[o + 3] = 255;
       }
     }
@@ -1250,10 +1644,8 @@ function enhance(img, mode) {
   }
   const Y = lumaOf(flat, n);
   if (mode === "gray") {
-    const hist = new Float64Array(256);
-    for (let i = 0; i < n; i++) hist[Y[i]]++;
-    const lut = levelsLut(Math.min(percentileOf(hist, n, 0.005), 90), 232, 1.12);
-    for (let i = 0; i < n; i++) Y[i] = lut[Y[i]];
+    const black = inkBlack(Y, w, h, prep);
+    Y.set(toneByContent(Y, w, h, prep, levelsLut(black, 232, 1.12), IDENTITY));
     const Yb = boxBlurU8(Y, w, h, sr), out = new Uint8ClampedArray(n * 4);
     for (let i = 0; i < n; i++) { const v = Y[i] + 0.7 * (Y[i] - Yb[i]); out[i * 4] = out[i * 4 + 1] = out[i * 4 + 2] = v; out[i * 4 + 3] = 255; }
     return { data: out, w, h };
@@ -1305,6 +1697,7 @@ function binarize(Yfull, w, h, model) {
       kind[l] = peak / tot > 0.6 || bw / bh > 4 ? 1 : 2;
     }
   }
+  if (model.photoPage) kind.fill(2); // 사진만 있는 쪽은 통째로 점묘
   // 띠는 실제 해상도에서 문턱값 계산
   const sx = model.w / w, sy = model.h / h;
   const labelAt = (x, y) => labels[Math.min(model.h - 1, (y * sy) | 0) * model.w + Math.min(model.w - 1, (x * sx) | 0)];
@@ -1320,7 +1713,8 @@ function binarize(Yfull, w, h, model) {
       let a = 0, wa = 0, b = 0, wb = 0;
       for (let v = 0; v < 256; v++) { if (v <= t) { a += v * hs[l][v]; wa += hs[l][v]; } else { b += v * hs[l][v]; wb += hs[l][v]; } }
       // 두 무리의 밝기 차이가 작으면(거의 한 색) 띠가 아니라 종이로 본다 → 반쪽만 검게 되는 얼룩 방지
-      if (!wa || !wb || b / wb - a / wa < 45) kind[l] = 0; else thr[l] = t;
+      // 옅은 회색·색 칸(어두운 무리도 밝다)은 종이처럼: 칸은 희게, 글자는 검게 (통째로 까맣게 되지 않게)
+      if (!wa || !wb || b / wb - a / wa < 45 || a / wa >= 150) kind[l] = 0; else thr[l] = t;
     }
   }
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -1375,23 +1769,36 @@ function rotate(img, deg) {
  * 한 장 처리: 문서 찾기(필요하면) → 펴기 → 보정 → 회전
  * job = { img, mode, corners, detect, manual, rotation }
  */
-function run(job) {
-  const { img } = job, t = [Date.now()];
-  let det = null, corners = job.corners;
-  if (!corners && job.detect) { det = findDocument(img, false, job.preview); corners = det ? det.corners : null; }
+function usableCorners(c, w, h) {
+  if (!Array.isArray(c) || c.length !== 4 || !c.every((p) => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite))) return null;
+  if (c.some(([x, y]) => x < -0.01 * w || y < -0.01 * h || x > 1.01 * w || y > 1.01 * h)) return null;
+  const q = orderCorners(c);
+  return isConvex(q) && polyArea(q) >= 0.005 * w * h ? c : null;
+}
+function run(job, keep) {
+  // keep: 같은 쪽을 같은 모서리로 다시 만들 때(보정 방식·회전만 바뀜) 쓸 지난 계산 { key, flat, prep }
+  const t = [Date.now()];
+  let det = null, corners = job.img && job.corners ? usableCorners(job.corners, job.img.w, job.img.h) : job.corners, flat = null, prep = null;
+  if (keep && job.keepKey && keep.key === job.keepKey) { flat = keep.flat; prep = keep.prep; }
+  else if (!job.img) throw Object.assign(new Error("keep"), { miss: true });
+  if (!flat) {
+    const { img } = job;
+    if (!corners && job.detect) { det = findDocument(img, false, job.preview); corners = det ? det.corners : null; }
+    t.push(Date.now());
+    const full = [[0, 0], [img.w - 1, 0], [img.w - 1, img.h - 1], [0, img.h - 1]];
+    flat = warp(img, corners || full, corners && !job.manual ? 0.008 : 0, job.focal35 || 0);
+  } else t.push(Date.now());
   t.push(Date.now());
-  const full = [[0, 0], [img.w - 1, 0], [img.w - 1, img.h - 1], [0, img.h - 1]];
-  const flat = warp(img, corners || full, corners && !job.manual ? 0.008 : 0, job.focal35 || 0);
-  t.push(Date.now());
-  const enh = enhance(flat, job.mode);
+  let enh = flat;
+  if (job.mode !== "original") { if (!prep) prep = prepareEnhance(flat); enh = finishEnhance(prep, job.mode); }
   t.push(Date.now());
   const out = rotate(enh, job.rotation || 0);
   t.push(Date.now());
   const ms = { detect: t[1] - t[0], warp: t[2] - t[1], enhance: t[3] - t[2], rotate: t[4] - t[3] };
-  return { out, ms, detected: job.detect ? (det ? det.corners : null) : undefined, confidence: det ? det.confidence : undefined };
+  return { out, ms, detected: job.detect ? (det ? det.corners : null) : undefined, confidence: det ? det.confidence : undefined, keep: { flat, prep, corners } };
 }
 
-return { run, findDocument, warp, enhance, estimateAspect, outputSize, homography, orderCorners, isConvex, polyArea, resizeArea };
+return { run, findDocument, warp, enhance, prepareEnhance, estimateAspect, outputSize, homography, orderCorners, isConvex, polyArea, resizeArea };
 }
 
 /* =====================================================================
@@ -1412,17 +1819,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let mode = "color", pages = [], nextId = 1;
 
 /* ---------- 알림 (되돌리기 같은 버튼도 붙일 수 있다) ---------- */
-let heldToast = null;
+const heldToasts = []; // 되돌리기 알림이 떠 있는 동안 온 알림은 줄 세워 두었다가 차례로 보여 준다
+const nextToast = () => { if (heldToasts.length) setTimeout(() => toast(heldToasts.shift()), 250); };
 function toast(msg, opts = {}) {
   const t = $("#toast");
-  if (!opts.action && t.classList.contains("actionable") && t.classList.contains("show")) { heldToast = msg; return; }
+  if (!opts.action && t.classList.contains("actionable") && t.classList.contains("show")) { if (!heldToasts.includes(msg)) heldToasts.push(msg); return; }
   t.replaceChildren(document.createTextNode(msg));
   if (opts.action) {
     const b = document.createElement("button");
     b.type = "button"; b.className = "toast-action"; b.textContent = opts.action;
     b.addEventListener("click", () => {
       t.classList.remove("show", "actionable"); opts.onAction();
-      if (heldToast) { const m = heldToast; heldToast = null; setTimeout(() => toast(m), 250); }
+      nextToast();
     });
     t.append(b);
   }
@@ -1431,105 +1839,200 @@ function toast(msg, opts = {}) {
   clearTimeout(toast.t);
   toast.t = setTimeout(() => {
     t.classList.remove("show", "actionable");
-    if (heldToast) { const m = heldToast; heldToast = null; setTimeout(() => toast(m), 250); }
+    nextToast();
   }, opts.action ? 6000 : 2800);
 }
 // 알림이 아래 버튼 줄을 가리지 않게 높이를 따라간다
 new ResizeObserver(() => document.documentElement.style.setProperty("--footer-h", $(".footer").offsetHeight + "px")).observe($(".footer"));
 
+const MODE_NAMES = { color: "컬러", bw: "흑백", gray: "회색조", original: "원본" };
+const modeOf = (p) => p.mode || mode; // 쪽마다 따로 고른 방식이 없으면 전체 방식
 function setMode(m) {
   mode = m;
-  document.querySelectorAll(".modes button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === m)));
+  document.querySelectorAll("#modes button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === m)));
   $("#modeHint").textContent = MODE_HINTS[m];
 }
-document.querySelectorAll(".modes button").forEach((b) => b.addEventListener("click", () => {
-  if (b.dataset.mode === mode) return;
-  setMode(b.dataset.mode);
-  pages.forEach((p) => schedule(p, true));
-  pump();
+// 위의 방식 단추는 모든 쪽에 적용한다 (쪽마다 따로 고른 것도 이것으로 맞춘다)
+document.querySelectorAll("#modes button").forEach((b) => b.addEventListener("click", () => {
+  const m = b.dataset.mode, picked = pages.some((p) => p.mode && !p.example);
+  if (m === mode && !picked) return;
+  const before = pages.map(modeOf);
+  setMode(m);
+  pages.forEach((p, i) => { p.mode = null; if (modeOf(p) !== before[i]) schedule(p, true); });
+  if (picked) toast(`모든 쪽을 ${MODE_NAMES[m]}(으)로 맞췄어요`);
+  render(); pump();
 }));
 setMode("color");
+
+/* ---------- 캔버스 도구: 사진을 RGBA 로 풀고, 결과를 JPEG/PNG 로 만든다 ----------
+ * 화면(<canvas>)과 계산 일꾼(OffscreenCanvas)이 같은 코드를 쓴다. mk(w,h) 는 캔버스를, blobOf 는 파일을 만든다 */
+function canvasTools(mk, blobOf) {
+  // src(ImageBitmap·이미지)를 긴 변 maxSide 이하로 그려 RGBA 로. 투명한 PNG는 흰 종이 위에 놓고 읽는다
+  function rasterize(src, bw, bh, maxSide, withPreview) {
+    const s = Math.min(1, maxSide / Math.max(bw, bh)), w = Math.max(1, Math.round(bw * s)), h = Math.max(1, Math.round(bh * s));
+    const c = mk(w, h), x = c.getContext("2d", { willReadFrequently: true });
+    if (!x) throw new Error("canvas");
+    x.fillStyle = "#fff"; x.fillRect(0, 0, w, h);
+    x.imageSmoothingQuality = "high";
+    x.drawImage(src, 0, 0, w, h);
+    const data = x.getImageData(0, 0, w, h).data;
+    let preview = null;
+    if (withPreview && Math.max(w, h) > 1600) { // 문서 찾기용으로 줄인 그림 (그래픽 칩이 빠르게 줄여 준다)
+      const k = 1600 / Math.max(w, h), pw = Math.round(w * k), ph = Math.round(h * k), pc = mk(pw, ph), px = pc.getContext("2d", { willReadFrequently: true });
+      px.imageSmoothingQuality = "high"; px.drawImage(c, 0, 0, pw, ph);
+      preview = { data: px.getImageData(0, 0, pw, ph).data, w: pw, h: ph };
+      pc.width = pc.height = 0;
+    }
+    c.width = c.height = 0;
+    return { data, w, h, preview };
+  }
+  // 결과 → 저장 파일(흑백·회색조는 PNG, 컬러·원본은 JPEG) + 목록용 작은 그림(긴 변 1000px, 결과가 작으면 없음)
+  async function encode(out, m) {
+    const c = mk(out.w, out.h), x = c.getContext("2d");
+    if (!x) throw new Error("canvas");
+    x.putImageData(new ImageData(out.data, out.w, out.h), 0, 0);
+    const png = m === "bw" || m === "gray";
+    const blob = await blobOf(c, png ? "image/png" : "image/jpeg", 0.92);
+    if (!blob) throw new Error("encode");
+    let thumb = null;
+    const k = Math.min(1, 1000 / Math.max(out.w, out.h));
+    if (k < 1) {
+      const t = mk(Math.round(out.w * k), Math.round(out.h * k)), tx = t.getContext("2d");
+      tx.imageSmoothingQuality = "high"; tx.drawImage(c, 0, 0, t.width, t.height);
+      thumb = await blobOf(t, "image/jpeg", 0.85);
+      t.width = t.height = 0;
+    }
+    c.width = c.height = 0;
+    return { blob, thumb };
+  }
+  // PDF 한 쪽: 흑백은 1비트로 눌러 담고(파일이 아주 작고 글자가 번지지 않는다), 나머지는 JPEG
+  async function pdfImage(px, m) {
+    const { w, h, data } = px;
+    if (m === "bw" && typeof CompressionStream === "function") {
+      const stride = Math.ceil(w / 8), bits = new Uint8Array(stride * h);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (data[(y * w + x) * 4] >= 128) bits[y * stride + (x >> 3)] |= 0x80 >> (x & 7);
+      const z = new Blob([bits]).stream().pipeThrough(new CompressionStream("deflate"));
+      return { bytes: new Uint8Array(await new Response(z).arrayBuffer()), dict: "/ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /FlateDecode" };
+    }
+    const c = mk(w, h);
+    c.getContext("2d").putImageData(new ImageData(data, w, h), 0, 0);
+    const jpg = await blobOf(c, "image/jpeg", 0.9);
+    c.width = c.height = 0;
+    return { bytes: new Uint8Array(await jpg.arrayBuffer()), dict: "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode" };
+  }
+  return { rasterize, encode, pdfImage };
+}
+const mkCanvas = (w, h) => { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; };
+const Tools = canvasTools(mkCanvas, (c, type, q) => new Promise((r) => c.toBlob(r, type, q)));
 
 /* ---------- 계산 일꾼(Web Worker): 화면이 멈추지 않게 무거운 계산은 여기서 ---------- */
 const WORKER_SRC = `"use strict";
 const E = (${scannerEngine.toString()})();
-self.onmessage = (e) => {
-  const { id, job } = e.data;
-  try { const r = E.run(job); self.postMessage({ id, ok: true, r }, [r.out.data.buffer]); }
-  catch (err) { self.postMessage({ id, ok: false, error: String((err && err.message) || err) }); }
+let T = null;
+try { // OffscreenCanvas 로 그림을 풀고 저장할 수 있는지 (안 되면 화면 쪽에서 한다)
+  const c = new OffscreenCanvas(2, 2);
+  if (c.getContext("2d") && c.convertToBlob) T = (${canvasTools.toString()})((w, h) => new OffscreenCanvas(w, h), (c, type, quality) => c.convertToBlob({ type, quality }));
+} catch {}
+self.postMessage({ caps: { draw: !!T } });
+let keep = null; // 마지막으로 만든 쪽의 펴진 그림과 조명 계산 (한 쪽만 들고 있는다)
+self.onmessage = async (e) => {
+  const { id, job, bitmap, pdf, dropKeep } = e.data;
+  if (dropKeep) { keep = null; return; }
+  if (pdf) { // 저장된 PNG 결과를 PDF 쪽으로
+    try {
+      const b = await createImageBitmap(pdf.blob), d = T.rasterize(b, b.width, b.height, 1e9, false);
+      b.close();
+      const im = await T.pdfImage(d, pdf.mode);
+      self.postMessage({ id, ok: true, r: im }, [im.bytes.buffer]);
+    } catch (err) { self.postMessage({ id, ok: false, canvas: true, error: String((err && err.message) || err) }); }
+    return;
+  }
+  let stage = "run";
+  try {
+    const t0 = Date.now(), reuse = !!(keep && job.keepKey && keep.key === job.keepKey);
+    if (!reuse) keep = null; // 다른 쪽이거나 모서리가 바뀌었다: 메모리부터 비운다
+    if (bitmap) {
+      if (reuse) bitmap.close();
+      else {
+        stage = "draw";
+        const d = T.rasterize(bitmap, bitmap.width, bitmap.height, job.maxSide, job.detect);
+        bitmap.close();
+        job.img = { data: d.data, w: d.w, h: d.h }; job.preview = d.preview;
+        stage = "run";
+      }
+    }
+    const t1 = Date.now(), r = E.run(job, keep), kept = r.keep;
+    if (job.img) { r.srcW = job.img.w; r.srcH = job.img.h; }
+    delete r.keep; delete job.img; delete job.preview;
+    r.ms.draw = t1 - t0;
+    if (job.encode) {
+      stage = "draw";
+      const t2 = Date.now(), f = await T.encode(r.out, job.mode);
+      r.ms.encode = Date.now() - t2;
+      r.blob = f.blob; r.thumb = f.thumb; r.out = { w: r.out.w, h: r.out.h };
+      // 보정 방식·회전만 바꿔 다시 만들 때는 펴기·조명 계산을 건너뛴다
+      if (job.keepBase !== undefined) keep = { key: job.keepBase + JSON.stringify(kept.corners || null), flat: kept.flat, prep: kept.prep };
+      r.keepKey = keep ? keep.key : null;
+      self.postMessage({ id, ok: true, r });
+    } else self.postMessage({ id, ok: true, r }, [r.out.data.buffer]);
+  } catch (err) { self.postMessage({ id, ok: false, canvas: stage === "draw", miss: !!(err && err.miss), error: String((err && err.message) || err) }); }
 };`;
-let worker = null, jobSeq = 0;
+let worker = null, jobSeq = 0, workerDraws = false, workerKeep = null, capsReady = () => {};
+// 일꾼이 그림을 직접 풀 수 있는지 알려 줄 때까지 (최대 1초) 기다린다
+const workerCaps = new Promise((r) => { capsReady = r; setTimeout(r, 1000); });
 const waiting = new Map();
 function startWorker() {
   try {
     worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })));
     worker.onmessage = (e) => {
+      if (e.data.caps) { workerDraws = e.data.caps.draw; capsReady(); return; }
       const w = waiting.get(e.data.id);
       if (!w) return;
       waiting.delete(e.data.id);
-      if (e.data.ok) w.resolve(e.data.r); else w.reject(new Error(e.data.error));
+      if (e.data.ok) w.resolve(e.data.r);
+      else if (e.data.canvas) { workerDraws = false; w.reject(Object.assign(new Error(e.data.error), { retry: true })); } // 일꾼에서 그리기 실패: 화면 쪽에서 다시
+      else if (e.data.miss) { workerKeep = null; w.reject(Object.assign(new Error("keep"), { retry: true })); } // 들고 있던 계산이 없다: 사진부터 다시
+      else w.reject(new Error(e.data.error));
     };
     worker.onerror = (e) => { if (e && e.preventDefault) e.preventDefault(); dropWorker(); };
   } catch { worker = null; }
 }
 function dropWorker() { // 워커를 못 쓰는 환경이면 화면 쪽에서 계산한다 (조금 느리지만 동작)
   if (worker) { try { worker.terminate(); } catch {} worker = null; }
+  workerDraws = false; workerKeep = null; capsReady();
   for (const [, w] of waiting) w.reject(Object.assign(new Error("worker"), { retry: true }));
   waiting.clear();
 }
 startWorker();
-function runJob(job) {
+// bitmap 이 있으면 일꾼이 그 사진을 풀고, 계산하고, 저장 파일까지 만든다. 없으면 job.img(RGBA)를 계산만 한다
+function runJob(job, bitmap) {
   if (!worker) return sleep(30).then(() => Engine.run(job));
+  return callWorker({ job, bitmap }, bitmap ? [bitmap] : job.img ? [job.img.data.buffer].concat(job.preview ? [job.preview.data.buffer] : []) : []);
+}
+function callWorker(msg, transfer) {
   return new Promise((resolve, reject) => {
     const id = ++jobSeq;
     waiting.set(id, { resolve, reject });
-    try { worker.postMessage({ id, job }, [job.img.data.buffer].concat(job.preview ? [job.preview.data.buffer] : [])); }
+    try { worker.postMessage(Object.assign({ id }, msg), transfer); }
     catch { waiting.delete(id); dropWorker(); reject(Object.assign(new Error("worker"), { retry: true })); }
   });
 }
 
 /* ---------- 사진 읽기: 필요할 때마다 원본 파일에서 다시 읽는다 (쪽마다 큰 그림을 들고 있지 않는다) ---------- */
+async function openBitmap(blob) {
+  try { return await createImageBitmap(blob, { imageOrientation: "from-image" }); } catch { return null; }
+}
 async function decodeImage(blob, maxSide, withPreview) {
-  let src = null, bw = 0, bh = 0;
-  try { src = await createImageBitmap(blob, { imageOrientation: "from-image" }); bw = src.width; bh = src.height; }
-  catch {
+  let src = await openBitmap(blob), bw = src ? src.width : 0, bh = src ? src.height : 0;
+  if (!src) {
     const url = URL.createObjectURL(blob);
     try {
       src = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
       bw = src.naturalWidth; bh = src.naturalHeight;
     } catch { src = null; } finally { URL.revokeObjectURL(url); }
   }
-  if (!src || !bw || !bh) throw Object.assign(new Error("decode"), { decode: true });
-  const s = Math.min(1, maxSide / Math.max(bw, bh)), w = Math.max(1, Math.round(bw * s)), h = Math.max(1, Math.round(bh * s));
-  const c = document.createElement("canvas");
-  c.width = w; c.height = h;
-  const x = c.getContext("2d", { willReadFrequently: true });
-  x.fillStyle = "#fff"; x.fillRect(0, 0, w, h); // 투명한 PNG는 흰 종이 위에 놓고 읽는다
-  x.imageSmoothingQuality = "high";
-  x.drawImage(src, 0, 0, w, h);
-  if (src.close) src.close();
-  const data = x.getImageData(0, 0, w, h).data;
-  let preview = null;
-  if (withPreview && Math.max(w, h) > 1600) { // 문서 찾기용으로 줄인 그림 (그래픽 칩이 빠르게 줄여 준다)
-    const k = 1600 / Math.max(w, h), pw = Math.round(w * k), ph = Math.round(h * k), pc = document.createElement("canvas");
-    pc.width = pw; pc.height = ph;
-    const px = pc.getContext("2d", { willReadFrequently: true });
-    px.imageSmoothingQuality = "high"; px.drawImage(c, 0, 0, pw, ph);
-    preview = { data: px.getImageData(0, 0, pw, ph).data, w: pw, h: ph };
-    pc.width = pc.height = 0;
-  }
-  c.width = c.height = 0;
-  return { data, w, h, preview };
-}
-async function encodeResult(out, m) {
-  const c = document.createElement("canvas");
-  c.width = out.w; c.height = out.h;
-  c.getContext("2d").putImageData(new ImageData(out.data, out.w, out.h), 0, 0);
-  const png = m === "bw" || m === "gray";
-  const blob = await new Promise((r) => c.toBlob(r, png ? "image/png" : "image/jpeg", 0.92));
-  c.width = c.height = 0;
-  if (!blob) throw new Error("encode");
-  return blob;
+  if (!src || bw < 16 || bh < 16) throw Object.assign(new Error("decode"), { decode: true }); // 못 열었거나 너무 작다
+  try { return Tools.rasterize(src, bw, bh, maxSide, withPreview); } finally { if (src.close) src.close(); }
 }
 
 // JPEG EXIF 의 35mm 환산 초점거리 (없으면 0). 원근에서 실제 종이 비율을 구할 때 쓴다
@@ -1555,21 +2058,6 @@ async function focal35Of(file) {
   return 0;
 }
 
-// 목록에 보여 줄 작은 그림 (긴 변 1000px). 큰 결과를 화면에 그대로 띄우면 쪽마다 메모리를 많이 먹는다
-async function thumbnail(out) {
-  const k = Math.min(1, 1000 / Math.max(out.w, out.h));
-  if (k >= 1) return null;
-  const c = document.createElement("canvas"), t = document.createElement("canvas");
-  c.width = out.w; c.height = out.h;
-  c.getContext("2d").putImageData(new ImageData(out.data, out.w, out.h), 0, 0);
-  t.width = Math.round(out.w * k); t.height = Math.round(out.h * k);
-  const x = t.getContext("2d");
-  x.imageSmoothingQuality = "high"; x.drawImage(c, 0, 0, t.width, t.height);
-  const b = await new Promise((r) => t.toBlob(r, "image/jpeg", 0.85));
-  c.width = c.height = t.width = t.height = 0;
-  return b;
-}
-
 /* ---------- 쪽 관리 ---------- */
 function newPage(file, extra) {
   return Object.assign({ id: nextId++, file, rotation: 0, version: 0, auto: undefined, confidence: 1, manual: null, result: null, error: false }, extra);
@@ -1592,24 +2080,40 @@ async function pump() {
     if (!pages.includes(page)) continue;
     running = page;
     render();
-    const v = page.version;
+    const v = page.version, m = modeOf(page);
     try {
       const detect = !page.manual && page.auto === undefined;
-      const dec = await decodeImage(page.file, MAX_SRC, detect), img = { data: dec.data, w: dec.w, h: dec.h };
-      page.srcW = img.w; page.srcH = img.h;
       if (page.focal35 === undefined) page.focal35 = await focal35Of(page.file);
-      const r = await runJob({ img, preview: dec.preview, mode, corners: page.manual || page.auto || null, detect, manual: !!page.manual, rotation: page.rotation, focal35: page.focal35 });
+      const job = { mode: m, corners: page.manual || page.auto || null, detect, manual: !!page.manual, rotation: page.rotation, focal35: page.focal35, maxSide: MAX_SRC };
+      let r = null, files = null;
+      if (worker) await workerCaps;
+      // 일꾼이 이 쪽을 같은 모서리로 펴 둔 게 있으면 사진을 다시 풀지 않는다 (보정 방식·회전만 바뀐 경우)
+      const keepBase = `${page.id}|${page.focal35}|${page.manual ? 1 : 0}|`, keepKey = detect ? null : keepBase + JSON.stringify(page.manual || page.auto || null);
+      const reuse = !!(worker && workerDraws && keepKey && keepKey === workerKeep);
+      const bmp = worker && workerDraws && !reuse ? await openBitmap(page.file) : null;
+      if (bmp && (bmp.width < 16 || bmp.height < 16)) { bmp.close(); throw Object.assign(new Error("decode"), { decode: true }); } // 너무 작다
+      if (reuse || bmp) { // 사진 풀기·계산·저장 파일 만들기를 모두 일꾼에서 (화면은 멈추지 않는다)
+        r = await runJob(Object.assign(job, { encode: true, keepBase, keepKey }), bmp);
+        workerKeep = r.keepKey;
+        files = { blob: r.blob, thumb: r.thumb };
+      } else {
+        const dec = await decodeImage(page.file, MAX_SRC, detect);
+        r = await runJob(Object.assign(job, { img: { data: dec.data, w: dec.w, h: dec.h }, preview: dec.preview }));
+        r.srcW = dec.w; r.srcH = dec.h;
+      }
+      if (r.srcW) { page.srcW = r.srcW; page.srcH = r.srcH; }
+      page.ms = r.ms;
       if (detect && !page.manual) {
         page.auto = r.detected || null;
         page.confidence = r.confidence ?? 0;
         if (!page.auto && !page.example && pages.includes(page)) toast("문서 테두리를 못 찾아 사진 전체를 썼어요. '모서리'로 맞춰 주세요.");
       }
       if (pages.includes(page) && page.version === v) {
-        const used = mode;
-        const blob = await encodeResult(r.out, used), thumb = await thumbnail(r.out);
+        if (!files) files = await Tools.encode(r.out, m);
         if (pages.includes(page) && page.version === v) {
+          const { blob, thumb } = files;
           if (page.result) URL.revokeObjectURL(page.result.url);
-          page.result = { blob, url: URL.createObjectURL(thumb || blob), w: r.out.w, h: r.out.h, ext: blob.type === "image/png" ? "png" : "jpg", mode: used, v };
+          page.result = { blob, url: URL.createObjectURL(thumb || blob), w: r.out.w, h: r.out.h, ext: blob.type === "image/png" ? "png" : "jpg", mode: m, v };
         }
       }
     } catch (err) {
@@ -1639,7 +2143,11 @@ $("#shoot").addEventListener("click", () => $("#camera").click());
 $("#pick").addEventListener("click", () => $("#gallery").click());
 $("#moreShot").addEventListener("click", () => $("#camera").click());
 
+function forgetKeep(p) {
+  if (worker && workerKeep && workerKeep.startsWith(`${p.id}|`)) { workerKeep = null; try { worker.postMessage({ dropKeep: true }); } catch {} }
+}
 function removePage(p) {
+  forgetKeep(p);
   pages = pages.filter((q) => q !== p);
   dirty.delete(p);
   if (p.result) URL.revokeObjectURL(p.result.url);
@@ -1647,7 +2155,7 @@ function removePage(p) {
 }
 // 지운 쪽은 몇 초 동안 되돌릴 수 있다
 let undo = null;
-function finishUndo() { if (!undo) return; const u = undo; undo = null; clearTimeout(u.timer); if (u.page.result) URL.revokeObjectURL(u.page.result.url); }
+function finishUndo() { if (!undo) return; const u = undo; undo = null; clearTimeout(u.timer); forgetKeep(u.page); if (u.page.result) URL.revokeObjectURL(u.page.result.url); }
 function deletePage(p) {
   finishUndo();
   clearPending();
@@ -1663,9 +2171,10 @@ function deletePage(p) {
     onAction: () => {
       if (!undo || undo.page !== p) return;
       clearTimeout(undo.timer); undo = null;
+      clearPending(); // 쪽이 돌아왔으니 준비해 둔 저장 파일은 버린다
       pages.splice(Math.min(idx, pages.length), 0, p);
       // 지우는 사이 버려진 다시 계산이 있었으면(회전·모서리 변경 등) 지금 다시 한다
-      if (!p.result || p.result.mode !== mode || p.result.v !== p.version) { dirty.add(p); render(`${p.id}:del`); pump(); }
+      if (!p.result || p.result.mode !== modeOf(p) || p.result.v !== p.version) { dirty.add(p); render(`${p.id}:del`); pump(); }
       else render(`${p.id}:del`);
     },
   });
@@ -1710,6 +2219,7 @@ function render(focusKey) {
       <div class="actions">
         ${btn("edit", "모서리", `${n}쪽 모서리 맞추기`, p.confidence < LOW_CONFIDENCE && !p.manual && r && !p.example ? "attention" : "")}
         ${btn("rotate", "↻ 회전", `${n}쪽 오른쪽으로 돌리기`)}
+        ${btn("pmode", `${MODE_NAMES[modeOf(p)]}<span class="caret" aria-hidden="true">▾</span>`, `${n}쪽 보정 방식: ${MODE_NAMES[modeOf(p)]}${p.mode ? " (이 쪽만)" : ""}. 바꾸기`, p.mode ? "picked" : "", false)}
         ${btn("save", "저장", `${n}쪽 이미지 저장`)}
         ${btn("del", "삭제", `${n}쪽 지우기`, "danger", false)}
       </div>`;
@@ -1741,6 +2251,7 @@ async function act(page, what, btnEl) {
   else if (what === "retry") schedule(page);
   else if (what === "rotate") { page.rotation = (page.rotation + 90) % 360; schedule(page); }
   else if (what === "edit") openEditor(page, btnEl);
+  else if (what === "pmode") openModeSheet(page, btnEl);
   else if (what === "save") {
     if (savingPage) return;
     savingPage = true;
@@ -1864,28 +2375,10 @@ async function makeZip(files) {
 
 /* ---------- 여러 장 → PDF ----------
  * 컬러는 JPEG를 그대로 넣고, 흑백은 1비트로 압축해 넣는다 (파일이 아주 작고 글자가 번지지 않는다) */
-async function deflate(bytes) {
-  const s = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate"));
-  return new Uint8Array(await new Response(s).arrayBuffer());
-}
-async function pixelsOf(blob) {
-  const img = await decodeImage(blob, 1e9);
-  return img;
-}
 async function pdfImage(result) {
   if (result.blob.type === "image/jpeg") return { bytes: new Uint8Array(await result.blob.arrayBuffer()), dict: "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode" };
-  const px = await pixelsOf(result.blob), { w, h, data } = px;
-  if (result.mode === "bw" && typeof CompressionStream === "function") {
-    const stride = Math.ceil(w / 8), bits = new Uint8Array(stride * h);
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (data[(y * w + x) * 4] >= 128) bits[y * stride + (x >> 3)] |= 0x80 >> (x & 7);
-    return { bytes: await deflate(bits), dict: "/ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /FlateDecode" };
-  }
-  const c = document.createElement("canvas");
-  c.width = w; c.height = h;
-  c.getContext("2d").putImageData(new ImageData(data, w, h), 0, 0);
-  const jpg = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.9));
-  c.width = c.height = 0;
-  return { bytes: new Uint8Array(await jpg.arrayBuffer()), dict: "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode" };
+  if (worker && workerDraws) { try { return await callWorker({ pdf: { blob: result.blob, mode: result.mode } }, []); } catch {} } // 일꾼에서 (화면이 멈추지 않는다)
+  return Tools.pdfImage(await decodeImage(result.blob, 1e9), result.mode);
 }
 async function makePdf(results) {
   const enc = new TextEncoder(), parts = [], offsets = [];
@@ -1915,6 +2408,15 @@ async function makePdf(results) {
 }
 
 const readyPages = () => pages.filter((p) => p.result && !isBusy(p) && !p.example);
+// 파일을 만드는 사이 쪽이 지워지거나 바뀌었는지 (그러면 다시 만든다)
+const sameReady = (ready) => { const now = readyPages(); return now.length === ready.length && now.every((p, i) => p === ready[i] && p.result === ready[i].result); };
+// 저장(확인 창)을 기다리는 동안에도 버튼은 다시 쓸 수 있게 하고, 결과는 끝나면 알린다
+async function finishSave(btn, promise, msg) {
+  delete btn.dataset.working; render();
+  const r = await promise;
+  if (r === "needs_tap") { setPending(btn, [promise.file], msg); return; }
+  report(r, msg);
+}
 // 모든 쪽을 이미지로 한 번에 저장
 //  - 아이폰 앱: 공유 시트 하나로 모든 이미지 → '이미지 N개 저장'
 //  - 그 밖: 한 장이면 그 이미지, 여러 장이면 ZIP 한 파일 (저장 확인도 한 번)
@@ -1939,9 +2441,10 @@ $("#saveImages").addEventListener("click", async () => {
       target = new File([await makeZip(files.map((f) => ({ name: f.name, blob: f })))], `스캔-${s}-${n}장.zip`, { type: "application/zip" });
       msg = `이미지 ${n}장을 한 파일(ZIP)로 저장했어요`;
     }
-    const r = await saveBlob(target, target.name);
-    if (r === "needs_tap") { setPending(btn, [target], msg); return; }
-    report(r, msg);
+    if (!sameReady(ready)) { delete btn.dataset.working; btn.disabled = false; btn.click(); return; } // 만드는 사이 쪽이 바뀌었다: 지금 쪽들로 다시
+    const pr = saveBlob(target, target.name);
+    pr.file = target;
+    return finishSave(btn, pr, msg);
   } catch { toast("저장 파일을 만들지 못했어요. 다시 눌러 주세요."); }
   delete btn.dataset.working; render();
 });
@@ -1955,11 +2458,50 @@ $("#savePdf").addEventListener("click", async () => {
   const done = `${ready.length}쪽을 PDF 한 파일로 저장했어요`;
   try {
     const pdf = new File([await makePdf(ready.map((p) => p.result))], `스캔-${stamp()}-${ready.length}쪽.pdf`, { type: "application/pdf" });
-    const r = await saveBlob(pdf, pdf.name);
-    if (r === "needs_tap") { setPending(btn, [pdf], done); return; }
-    report(r, done);
+    if (!sameReady(ready)) { delete btn.dataset.working; btn.disabled = false; btn.click(); return; } // 만드는 사이 쪽이 바뀌었다: 지금 쪽들로 다시
+    const pr = saveBlob(pdf, pdf.name);
+    pr.file = pdf;
+    return finishSave(btn, pr, done);
   } catch { toast("PDF를 만들지 못했어요. 쪽 수를 줄여 다시 해 주세요."); }
   delete btn.dataset.working; render();
+});
+
+/* ---------- 쪽마다 보정 방식 고르기 ---------- */
+const sheetEl = $("#modeSheet"), sheetBtns = [...sheetEl.querySelectorAll("[data-pmode]")];
+let sheet = null;
+function openModeSheet(page, opener) {
+  sheet = { page, opener: opener && opener.dataset.key };
+  $("#msTitle").textContent = `${pages.indexOf(page) + 1}쪽 보정 방식`;
+  const m = modeOf(page);
+  sheetBtns.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.pmode === m)));
+  $("#msHint").textContent = `${MODE_HINTS[m]} ${page.mode ? "이 쪽만 따로 골랐어요." : "지금은 모든 쪽과 같은 방식이에요."}`;
+  sheetEl.hidden = false;
+  document.querySelectorAll(".wrap, .footer").forEach((el) => (el.inert = true));
+  (sheetBtns.find((b) => b.dataset.pmode === m) || sheetBtns[0]).focus();
+}
+function closeModeSheet() {
+  if (!sheet) return;
+  const key = sheet.opener;
+  sheet = null; sheetEl.hidden = true;
+  document.querySelectorAll(".wrap, .footer").forEach((el) => (el.inert = false));
+  const el = key && document.querySelector(`[data-key="${key}"]`);
+  if (el) el.focus();
+}
+sheetBtns.forEach((b) => b.addEventListener("click", () => {
+  if (!sheet) return;
+  const p = sheet.page, before = modeOf(p), m = b.dataset.pmode;
+  p.mode = m === mode ? null : m; // 전체 방식과 같으면 '따로 고름'을 없앤다
+  closeModeSheet();
+  if (modeOf(p) !== before && pages.includes(p)) schedule(p); else render();
+}));
+$("#msClose").addEventListener("click", closeModeSheet);
+sheetEl.addEventListener("click", (e) => { if (e.target === sheetEl) closeModeSheet(); });
+sheetEl.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); closeModeSheet(); return; }
+  if (e.key !== "Tab") return; // 시트 안에서만 포커스가 돈다
+  const f = [...sheetBtns, $("#msClose")], i = f.indexOf(document.activeElement);
+  e.preventDefault();
+  f[(i + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
 });
 
 /* ---------- 모서리 맞추기 ---------- */
@@ -2146,7 +2688,7 @@ async function exampleBlob() {
   pages.push(p); schedule(p);
 })();
 
-window.__scanner = { Engine, pages: () => pages, makeZip, makePdf, decodeImage, isWorker: () => !!worker };
+window.__scanner = { Engine, pages: () => pages, makeZip, makePdf, decodeImage, isWorker: () => !!worker, workerDraws: () => !!worker && workerDraws };
 </script>
 
 <script>
