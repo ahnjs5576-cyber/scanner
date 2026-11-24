@@ -1,5 +1,5 @@
 // 오프라인 캐시: 앱 파일을 저장해 두고, 인터넷이 되면 새 버전을 받아 둔다.
-const VERSION = "8276ac5821e7";
+const VERSION = "3d859cf42700";
 const APP = "scanner-app-" + VERSION, FONTS = "scanner-fonts";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png",
   "./icons/maskable-512.png", "./icons/apple-touch-icon.png", "./icons/favicon-32.png"];
@@ -7,7 +7,8 @@ const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-19
 const good = (res) => res && res.ok && res.type === "basic" && !res.redirected;
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(APP).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // 브라우저 HTTP 캐시에 남은 옛 파일이 아니라 서버의 최신 파일을 받아 둔다
+  e.waitUntil(caches.open(APP).then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: "reload" })))).then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", (e) => {
   e.waitUntil(caches.keys()
