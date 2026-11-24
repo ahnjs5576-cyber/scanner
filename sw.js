@@ -1,5 +1,5 @@
 // 오프라인 캐시: 앱 파일을 저장해 두고, 인터넷이 되면 새 버전을 받아 둔다.
-const VERSION = "ac47b504be3b";
+const VERSION = "faf9fdc816d5";
 const APP = "scanner-app-" + VERSION, FONTS = "scanner-fonts";
 const ASSETS = ["./", "./index.html", "./manifest.webmanifest", "./icons/icon-192.png", "./icons/icon-512.png",
   "./icons/maskable-512.png", "./icons/apple-touch-icon.png", "./icons/favicon-32.png"];

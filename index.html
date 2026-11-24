@@ -1193,6 +1193,8 @@ function findDocument(img, debug, preview) {
   if (!J.best || J.confidence < 0.03) return null; // 그럴듯한 사각형이 전혀 없다
   // 종이가 사진을 꽉 채워 테두리가 안 보이고, 고른 것은 문서 속 작은 색 띠·상자다 → 사진 전체를 쓴다('테두리 못 찾음')
   if (J.f.inRel < 0.6 && J.f.area < 0.15 && J.f.border >= 0.6) return null;
+  // 사진 가장자리 띠가 종이이고, 고른 사각형 바깥 두 변 이상으로 글자 있는 종이가 이어진다 → 문서 속 회색 상자·표·그림자를 잡은 것
+  if (J.f.border >= 0.6 && J.f.cont >= 2) return null;
   const coarse = J.best.q.map(([x, y]) => [x / sm.scale, y / sm.scale]);
   // 무늬 위에서는 정밀 맞춤이 무늬 선에 끌려가므로, 무늬를 지운 그림의 직선을 그대로 쓴다
   return { corners: refineCorners(img, coarse, md), confidence: J.confidence, features: J.f };
@@ -1361,14 +1363,26 @@ function grayPrintMask(F, w, h, raw) {
   const touches = (l) => x0[l] <= edgeM || y0[l] <= edgeM || x1[l] >= w - 1 - edgeM || y1[l] >= h - 1 - edgeM;
   const isPrint = new Uint8Array(nc + 1);
   // 쪽 가장자리에 닿는 덩어리 = 종이(그늘 포함). 그 밝기를 주변 종이 기준으로 쓴다
-  const paperLab = new Uint8Array(nc + 1);
-  for (let l = 1; l <= nc; l++) if (touches(l) && counts[l] >= minArea) paperLab[l] = 1;
+  // 단, 마주 보는 두 가장자리를 잇는 곧은 띠(꽉 찬 직사각형, 쪽의 35% 이하 두께)는 인쇄된 머리띠다
+  const band = (l) => {
+    const bw = x1[l] - x0[l] + 1, bh = y1[l] - y0[l] + 1, fill = counts[l] / (bw * bh);
+    const across = x0[l] <= edgeM && x1[l] >= w - 1 - edgeM && bh <= 0.35 * h, down = y0[l] <= edgeM && y1[l] >= h - 1 - edgeM && bw <= 0.35 * w;
+    return (across || down) && fill >= 0.9;
+  };
+  const paperLab = new Uint8Array(nc + 1), bandLab = new Uint8Array(nc + 1);
+  for (let l = 1; l <= nc; l++) if (touches(l) && counts[l] >= minArea) { if (band(l)) bandLab[l] = 1; else paperLab[l] = 1; }
   const pad = Math.round(0.04 * big), med = (a) => (a.length ? Float64Array.from(a).sort()[a.length >> 1] : 0);
   const all = [];
   for (let i = 0; i < n; i += 7) if (paperLab[labels[i]]) all.push(F[i]);
   const globalPaper = med(all); // 둘레에 종이가 없으면(사진 속 지붕 등) 쪽 전체의 종이 밝기와 비교
+  for (let l = 1; l <= nc; l++) if (bandLab[l]) { // 머리띠: 쪽 전체 종이보다 뚜렷이 어두우면 인쇄
+    const v = [];
+    for (let y = y0[l]; y <= y1[l]; y += 3) for (let x = x0[l]; x <= x1[l]; x += 3) if (labels[y * w + x] === l) v.push(F[y * w + x]);
+    const b = med(v);
+    if (b < globalPaper * 0.97 && globalPaper - b >= minStep) isPrint[l] = 1;
+  }
   for (let l = 1; l <= nc; l++) {
-    if (paperLab[l] || counts[l] < minArea || counts[l] > 0.85 * n) continue;
+    if (paperLab[l] || bandLab[l] || counts[l] < minArea || counts[l] > 0.85 * n) continue;
     const inside = [], around = [], st = Math.max(1, Math.round(Math.sqrt(counts[l]) / 40));
     const X0 = Math.max(0, x0[l] - pad), X1 = Math.min(w - 1, x1[l] + pad), Y0 = Math.max(0, y0[l] - pad), Y1 = Math.min(h - 1, y1[l] + pad);
     const st2 = Math.max(1, Math.round(Math.sqrt((X1 - X0 + 1) * (Y1 - Y0 + 1)) / 60));
@@ -1714,7 +1728,15 @@ function binarize(Yfull, w, h, model) {
       for (let v = 0; v < 256; v++) { if (v <= t) { a += v * hs[l][v]; wa += hs[l][v]; } else { b += v * hs[l][v]; wb += hs[l][v]; } }
       // 두 무리의 밝기 차이가 작으면(거의 한 색) 띠가 아니라 종이로 본다 → 반쪽만 검게 되는 얼룩 방지
       // 옅은 회색·색 칸(어두운 무리도 밝다)은 종이처럼: 칸은 희게, 글자는 검게 (통째로 까맣게 되지 않게)
-      if (!wa || !wb || b / wb - a / wa < 45 || a / wa >= 150) kind[l] = 0; else thr[l] = t;
+      // 단, 글자 없는 회색 칸·막대(한 가지 밝기, 종이보다 뚜렷이 어둡다)는 점묘로 회색을 남긴다 (테두리만 남거나 사라지지 않게)
+      // 칸의 밝기 = 종이보다 어두운 화소의 중앙값, 글자 = 그보다 50 이상 어두운 화소
+      let tot = 0, under = 0, dark = 0, fillLevel = 255;
+      for (let v = 0; v < 256; v++) { tot += hs[l][v]; if (v < 235) under += hs[l][v]; }
+      for (let v = 0, acc = 0; v < 235; v++) { acc += hs[l][v]; if (acc >= under / 2) { fillLevel = v; break; } }
+      for (let v = 0; v < Math.max(0, fillLevel - 50); v++) dark += hs[l][v];
+      const flatFill = under > 0.2 * tot && dark < 0.03 * tot; // 축선·짧은 글자 정도는 괜찮다 (점묘에서도 진한 글자는 검게 남는다)
+      if (flatFill && fillLevel < 217 && fillLevel >= 100) kind[l] = 2;
+      else if (!wa || !wb || b / wb - a / wa < 45 || a / wa >= 150) kind[l] = 0; else thr[l] = t;
     }
   }
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
@@ -1859,6 +1881,7 @@ document.querySelectorAll("#modes button").forEach((b) => b.addEventListener("cl
   const before = pages.map(modeOf);
   setMode(m);
   pages.forEach((p, i) => { p.mode = null; if (modeOf(p) !== before[i]) schedule(p, true); });
+  if (undo) undo.page.mode = null; // 되돌리기를 기다리는 쪽도 (돌아오면 다시 만든다)
   if (picked) toast(`모든 쪽을 ${MODE_NAMES[m]}(으)로 맞췄어요`);
   render(); pump();
 }));
@@ -2408,8 +2431,7 @@ async function makePdf(results) {
 }
 
 const readyPages = () => pages.filter((p) => p.result && !isBusy(p) && !p.example);
-// 파일을 만드는 사이 쪽이 지워지거나 바뀌었는지 (그러면 다시 만든다)
-const sameReady = (ready) => { const now = readyPages(); return now.length === ready.length && now.every((p, i) => p === ready[i] && p.result === ready[i].result); };
+const scanning = () => pages.some((p) => !p.example && isBusy(p));
 // 저장(확인 창)을 기다리는 동안에도 버튼은 다시 쓸 수 있게 하고, 결과는 끝나면 알린다
 async function finishSave(btn, promise, msg) {
   delete btn.dataset.working; render();
@@ -2417,6 +2439,32 @@ async function finishSave(btn, promise, msg) {
   if (r === "needs_tap") { setPending(btn, [promise.file], msg); return; }
   report(r, msg);
 }
+/**
+ * 저장 파일을 만들어 저장한다. 스캔 중인 쪽이 있으면 끝나기를 기다리고, 만드는 사이 쪽이 지워지거나
+ * 바뀌면(회전·보정 방식·모서리) 지금 쪽들로 다시 만든다 → 화면에 보이는 그대로가 저장된다.
+ * make(ready) → { file, msg }
+ */
+async function buildAndSave(btn, label, make, failMsg) {
+  btn.dataset.working = "1"; btn.disabled = true; btn.textContent = label;
+  try {
+    for (let tries = 0; tries < 8; tries++) {
+      while (scanning()) await sleep(150);
+      const ready = readyPages(), snap = ready.map((p) => p.result);
+      if (!ready.length) { toast("저장할 쪽이 없어요."); break; }
+      const { file, msg } = await make(ready);
+      const now = readyPages();
+      if (scanning() || now.length !== ready.length || now.some((p, i) => p !== ready[i] || p.result !== snap[i])) continue;
+      const pr = saveBlob(file, file.name);
+      pr.file = file;
+      return finishSave(btn, pr, msg);
+    }
+  } catch { toast(failMsg); }
+  delete btn.dataset.working; render();
+}
+const imageFiles = (ready) => {
+  const s = stamp(), n = ready.length, digits = Math.max(2, String(n).length); // 100장이 넘어도 이름순 = 쪽순
+  return ready.map((p, i) => new File([p.result.blob], n === 1 ? imageName(p) : `스캔-${s}-${String(i + 1).padStart(digits, "0")}.${p.result.ext}`, { type: p.result.blob.type }));
+};
 // 모든 쪽을 이미지로 한 번에 저장
 //  - 아이폰 앱: 공유 시트 하나로 모든 이미지 → '이미지 N개 저장'
 //  - 그 밖: 한 장이면 그 이미지, 여러 장이면 ZIP 한 파일 (저장 확인도 한 번)
@@ -2424,46 +2472,29 @@ $("#saveImages").addEventListener("click", async () => {
   const btn = $("#saveImages");
   if (takePending(btn) || btn.dataset.working) return;
   const ready = readyPages();
-  if (!ready.length) return;
-  const s = stamp(), n = ready.length;
-  const done = n > 1 ? `이미지 ${n}장을 저장했어요` : "이미지를 저장했어요";
-  const digits = Math.max(2, String(n).length); // 100장이 넘어도 이름순 = 쪽순
-  const files = ready.map((p, i) => new File([p.result.blob], n === 1 ? imageName(p) : `스캔-${s}-${String(i + 1).padStart(digits, "0")}.${p.result.ext}`, { type: p.result.blob.type }));
-  if (shareable(files)) { // 누른 직후 바로 연다
+  if (!ready.length) { toast("저장할 쪽이 없어요."); return; }
+  const files = imageFiles(ready), n = ready.length, done = n > 1 ? `이미지 ${n}장을 저장했어요` : "이미지를 저장했어요";
+  if (!scanning() && shareable(files)) { // 누른 직후 바로 연다
     const r = await shareFiles(files);
     if (r === "needs_tap") setPending(btn, files, done); else report(r, done);
     return;
   }
-  btn.dataset.working = "1"; btn.disabled = true; btn.textContent = "준비하는 중…";
-  try {
-    let target = files[0], msg = done;
-    if (n > 1) {
-      target = new File([await makeZip(files.map((f) => ({ name: f.name, blob: f })))], `스캔-${s}-${n}장.zip`, { type: "application/zip" });
-      msg = `이미지 ${n}장을 한 파일(ZIP)로 저장했어요`;
-    }
-    if (!sameReady(ready)) { delete btn.dataset.working; btn.disabled = false; btn.click(); return; } // 만드는 사이 쪽이 바뀌었다: 지금 쪽들로 다시
-    const pr = saveBlob(target, target.name);
-    pr.file = target;
-    return finishSave(btn, pr, msg);
-  } catch { toast("저장 파일을 만들지 못했어요. 다시 눌러 주세요."); }
-  delete btn.dataset.working; render();
+  await buildAndSave(btn, "준비하는 중…", async (ready) => {
+    const files = imageFiles(ready), n = ready.length;
+    if (n === 1) return { file: files[0], msg: "이미지를 저장했어요" };
+    const zip = new File([await makeZip(files.map((f) => ({ name: f.name, blob: f })))], `스캔-${stamp()}-${n}장.zip`, { type: "application/zip" });
+    return { file: zip, msg: `이미지 ${n}장을 한 파일(ZIP)로 저장했어요` };
+  }, "저장 파일을 만들지 못했어요. 다시 눌러 주세요.");
 });
 
 $("#savePdf").addEventListener("click", async () => {
   const btn = $("#savePdf");
   if (takePending(btn) || btn.dataset.working) return;
-  const ready = readyPages();
-  if (!ready.length) return;
-  btn.dataset.working = "1"; btn.disabled = true; btn.textContent = "만드는 중…";
-  const done = `${ready.length}쪽을 PDF 한 파일로 저장했어요`;
-  try {
-    const pdf = new File([await makePdf(ready.map((p) => p.result))], `스캔-${stamp()}-${ready.length}쪽.pdf`, { type: "application/pdf" });
-    if (!sameReady(ready)) { delete btn.dataset.working; btn.disabled = false; btn.click(); return; } // 만드는 사이 쪽이 바뀌었다: 지금 쪽들로 다시
-    const pr = saveBlob(pdf, pdf.name);
-    pr.file = pdf;
-    return finishSave(btn, pr, done);
-  } catch { toast("PDF를 만들지 못했어요. 쪽 수를 줄여 다시 해 주세요."); }
-  delete btn.dataset.working; render();
+  if (!readyPages().length) { toast("저장할 쪽이 없어요."); return; }
+  await buildAndSave(btn, "만드는 중…", async (ready) => ({
+    file: new File([await makePdf(ready.map((p) => p.result))], `스캔-${stamp()}-${ready.length}쪽.pdf`, { type: "application/pdf" }),
+    msg: `${ready.length}쪽을 PDF 한 파일로 저장했어요`,
+  }), "PDF를 만들지 못했어요. 쪽 수를 줄여 다시 해 주세요.");
 });
 
 /* ---------- 쪽마다 보정 방식 고르기 ---------- */
@@ -2496,8 +2527,11 @@ sheetBtns.forEach((b) => b.addEventListener("click", () => {
 }));
 $("#msClose").addEventListener("click", closeModeSheet);
 sheetEl.addEventListener("click", (e) => { if (e.target === sheetEl) closeModeSheet(); });
+document.addEventListener("keydown", (e) => { // 시트 안 빈 곳을 눌러 포커스가 빠져도 Esc 로 닫힌다
+  if (e.key !== "Escape") return;
+  if (sheet) { e.preventDefault(); closeModeSheet(); } else if (ed) { e.preventDefault(); closeEditor(); }
+});
 sheetEl.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { e.preventDefault(); closeModeSheet(); return; }
   if (e.key !== "Tab") return; // 시트 안에서만 포커스가 돈다
   const f = [...sheetBtns, $("#msClose")], i = f.indexOf(document.activeElement);
   e.preventDefault();
@@ -2599,7 +2633,6 @@ handles.forEach((hd, i) => {
   });
 });
 editor.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { e.preventDefault(); closeEditor(); return; }
   if (e.key !== "Tab") return; // 대화 상자 안에서만 포커스가 돈다
   const f = [...handles, ...editor.querySelectorAll(".tools button")], i = f.indexOf(document.activeElement);
   e.preventDefault();
